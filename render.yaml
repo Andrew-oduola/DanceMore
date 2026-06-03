@@ -1,0 +1,28 @@
+# Render blueprint for the DanceMore backend.
+# The frontend (dancemore-spike) deploys separately (e.g. Vercel) with
+# NEXT_PUBLIC_API_URL pointed at this service's URL.
+#
+# After the FIRST deploy, seed the demo account once from the Render shell:
+#   python manage.py seed_demo
+# (Deliberately not part of buildCommand — it would wipe/reseed on every deploy.)
+
+services:
+  - type: web
+    name: dancemore-api
+    runtime: python
+    rootDir: dancemore-api
+    plan: free
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate
+    startCommand: gunicorn dancemore_api.wsgi
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        sync: false # paste the Neon Postgres connection string in the dashboard
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false # set to the deployed frontend origin, e.g. https://dancemore.vercel.app
+      # ALLOWED_HOSTS is handled automatically via RENDER_EXTERNAL_HOSTNAME.
