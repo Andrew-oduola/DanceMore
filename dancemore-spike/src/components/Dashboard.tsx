@@ -13,7 +13,13 @@ import {
 import { getStats, type Stats } from "@/lib/api";
 import { scoreColor } from "@/lib/scoreColor";
 
-export function Dashboard() {
+export function Dashboard({
+  libraryMoveIds,
+  completeThreshold,
+}: {
+  libraryMoveIds: string[];
+  completeThreshold: number;
+}) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState("");
 
@@ -40,6 +46,13 @@ export function Dashboard() {
   // as distinct points in order; show the date in the tick/tooltip.
   const timeline = stats.timeline.map((p, i) => ({ ...p, i }));
 
+  // "Completed" = best score on a library move crossed the threshold.
+  const best: Record<string, number> = {};
+  for (const m of stats.moves) best[m.move_id] = m.best_score;
+  const completedCount = libraryMoveIds.filter(
+    (id) => (best[id] ?? 0) >= completeThreshold
+  ).length;
+
   return (
     <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Headline row */}
@@ -54,6 +67,11 @@ export function Dashboard() {
           label="Average score"
           value={String(stats.average_score)}
           color={scoreColor(stats.average_score)}
+        />
+        <Stat
+          label="Moves completed"
+          value={`${completedCount}/${libraryMoveIds.length}`}
+          color={completedCount > 0 ? "#4ade80" : undefined}
         />
       </div>
 
@@ -122,7 +140,12 @@ export function Dashboard() {
                   marginBottom: 4,
                 }}
               >
-                <span>{m.move_name}</span>
+                <span>
+                  {m.move_name}
+                  {m.best_score >= completeThreshold && (
+                    <span style={{ color: "#4ade80", marginLeft: 6 }}>✓</span>
+                  )}
+                </span>
                 <span style={{ color: "#888" }}>
                   best{" "}
                   <strong style={{ color: scoreColor(m.best_score) }}>

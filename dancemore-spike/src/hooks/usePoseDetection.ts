@@ -1,16 +1,37 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import * as tf from "@tensorflow/tfjs-core";
-import "@tensorflow/tfjs-converter";
-import "@tensorflow/tfjs-backend-webgl";
 import * as poseDetection from "@tensorflow-models/pose-detection";
+import { createMoveNetDetector } from "@/lib/detector";
 import { angleVector, type KP } from "@/lib/pose";
 
 const MIN_CONF = 0.3;
+// Fallback ghost sizing when the user isn't detected: a standing person's
+// torso (shoulder-center → hip-center) is roughly this fraction of the frame.
+const GHOST_FALLBACK_TORSO = 0.18;
 
 // Called once per frame with the latest keypoints and their angle-vector.
 export type OnFrame = (keypoints: KP[], angles: Record<number, number>) => void;
+
+// Hip-center + torso length — the anchor used to place and scale the ghost.
+function anchorOf(
+  keypoints: KP[]
+): { hip: { x: number; y: number }; torso: number } | null {
+  const by: Record<string, KP> = {};
+  for (const k of keypoints) by[k.name] = k;
+  const parts = [
+    by["left_hip"],
+    by["right_hip"],
+    by["left_shoulder"],
+    by["right_shoulder"],
+  ];
+  if (parts.some((p) => !p || p.score < MIN_CONF)) return null;
+  const [lh, rh, ls, rs] = parts as KP[];
+  const hip = { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 };
+  const shoulder = { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 };
+  const torso = Math.hypot(shoulder.x - hip.x, shoulder.y - hip.y);
+  return torso > 1 ? { hip, torso } : null;
+}
 
 // Sets up getUserMedia + MoveNet SINGLEPOSE_LIGHTNING (webgl, tfjs runtime),
 // runs ONE requestAnimationFrame loop, draws the cyan/white skeleton overlay,
@@ -28,6 +49,11 @@ export function usePoseDetection(onFrame?: OnFrame) {
     onFrameRef.current = onFrame;
   });
 
+  // The target pose to draw as a ghost under the live skeleton. Consumers set
+  // ghostRef.current to the current checkpoint's stored keypoints (or null) —
+  // a ref, so swapping targets never restarts the loop.
+  const ghostRef = useRef<KP[] | null>(null);
+
   const detectorRef = useRef<poseDetection.PoseDetector | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -40,6 +66,60 @@ export function usePoseDetection(onFrame?: OnFrame) {
     const adjacentPairs = poseDetection.util.getAdjacentPairs(
       poseDetection.SupportedModels.MoveNet
     );
+
+    // Draw the target checkpoint's pose as a translucent magenta ghost,
+    // translated + uniformly scaled so its hip-center and torso length match
+    // the user's — "bend until you cover the glow". Falls back to a centered,
+    // sensibly-sized ghost when either side lacks confident hips/shoulders.
+    function drawGhost(
+      ctx: CanvasRenderingContext2D,
+      canvas: HTMLCanvasElement,
+      ghost: KP[],
+      live: KP[]
+    ) {
+      const g = anchorOf(ghost);
+      if (!g) return; // reference itself lacks anchors — nothing sane to draw
+      const u = anchorOf(live);
+      const scale = u
+        ? u.torso / g.torso
+        : (canvas.height * GHOST_FALLBACK_TORSO) / g.torso;
+      const at = u
+        ? u.hip
+        : { x: canvas.width / 2, y: canvas.height * 0.55 };
+      const map = (k: KP) => ({
+        x: at.x + (k.x - g.hip.x) * scale,
+        y: at.y + (k.y - g.hip.y) * scale,
+      });
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(255, 64, 255, 0.55)";
+      ctx.fillStyle = "rgba(255, 64, 255, 0.55)";
+      ctx.lineWidth = 6;
+      ctx.lineCap = "round";
+      ctx.shadowColor = "rgba(255, 64, 255, 0.8)";
+      ctx.shadowBlur = 10;
+      for (const [i, j] of adjacentPairs) {
+        const a = ghost[i];
+        const b = ghost[j];
+        if (a && b && a.score >= MIN_CONF && b.score >= MIN_CONF) {
+          const pa = map(a);
+          const pb = map(b);
+          ctx.beginPath();
+          ctx.moveTo(pa.x, pa.y);
+          ctx.lineTo(pb.x, pb.y);
+          ctx.stroke();
+        }
+      }
+      for (const kp of ghost) {
+        if (kp.score >= MIN_CONF) {
+          const p = map(kp);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
 
     function drawSkeleton(keypoints: KP[]) {
       const canvas = canvasRef.current;
@@ -55,6 +135,9 @@ export function usePoseDetection(onFrame?: OnFrame) {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // target pose first, so the user's skeleton draws on top of it
+      if (ghostRef.current) drawGhost(ctx, canvas, ghostRef.current, keypoints);
 
       // edges
       ctx.strokeStyle = "cyan";
@@ -122,12 +205,7 @@ export function usePoseDetection(onFrame?: OnFrame) {
           await video.play();
         }
 
-        await tf.setBackend("webgl");
-        await tf.ready();
-        const detector = await poseDetection.createDetector(
-          poseDetection.SupportedModels.MoveNet,
-          { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
-        );
+        const detector = await createMoveNetDetector();
         if (cancelled) {
           detector.dispose();
           return;
@@ -151,5 +229,5 @@ export function usePoseDetection(onFrame?: OnFrame) {
     };
   }, []);
 
-  return { videoRef, canvasRef, ready, error };
+  return { videoRef, canvasRef, ready, error, ghostRef };
 }

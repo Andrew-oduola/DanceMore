@@ -2,7 +2,7 @@
 
 **Your AI dance coach — real-time pose scoring in the browser.**
 
-Learning to dance alone is discouraging: you can't see what you're doing wrong, and you can't see yourself getting better. DanceMore fixes both. Pick a beginner move, and your webcam + an on-device pose model (MoveNet) guide you through its key poses with a live 0–100 score — hold a pose well enough and it locks in. Every attempt is saved to your account, and a progress dashboard turns practice into a visible story: score over time, per-move bests, and a day streak. Injury-prevention is built in: a daily warmup checklist before your first practice, and a rest-day nudge when your streak runs long.
+Learning to dance alone is discouraging: you can't see what you're doing wrong, and you can't see yourself getting better. DanceMore fixes both. Pick a beginner move — watch its demo clip, then your webcam + an on-device pose model (MoveNet) guide you through its key poses with a live 0–100 score — hold a pose well enough and it locks in. **Or upload any dance video**: the app extracts its key poses so you can practice moves you choose yourself. Every attempt is saved to your account, and a progress dashboard turns practice into a visible story: score over time, per-move bests, a day streak, and "✓ Completed" mastery once your best score crosses the bar. Injury-prevention is built in: a daily warmup checklist before your first practice, and a rest-day nudge when your streak runs long.
 
 **Live demo:** _coming soon — URL goes here_ (log in as `demo` / `demo1234` to see a seeded 24-day progress story)
 
@@ -11,7 +11,7 @@ Learning to dance alone is discouraging: you can't see what you're doing wrong, 
 | Layer | Tech |
 |---|---|
 | Frontend | Next.js 16 (App Router), React 19, TypeScript, Recharts |
-| Pose estimation | TensorFlow.js + MoveNet (SinglePose Lightning), fully in-browser — video never leaves the device |
+| Pose estimation | TensorFlow.js + MoveNet (SinglePose Lightning), fully in-browser — video never leaves the device. Model self-hosted under `public/models/` (no tfhub dependency at runtime), with CPU-backend fallback when WebGL is unavailable |
 | Scoring | Joint-angle comparison (8 joints), pure TypeScript (`dancemore-spike/src/lib/pose.ts`) |
 | Backend | Django 6 + Django REST Framework, JWT auth (SimpleJWT) |
 | Database | SQLite locally (zero config) · Postgres (Neon) in production |

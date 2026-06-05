@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import Link from "next/link";
 import { scorePose } from "@/lib/pose";
 import { loadMoves, type Move } from "@/lib/moves";
@@ -13,10 +19,12 @@ import {
   getToken,
   saveAttempt,
   subscribeToken,
+  type Stats,
 } from "@/lib/api";
 import { AuthScreen } from "@/components/AuthScreen";
 import { Dashboard } from "@/components/Dashboard";
 import { WarmupChecklist } from "@/components/WarmupChecklist";
+import { UploadMove } from "@/components/UploadMove";
 
 // ── Demo-feel dials ─────────────────────────────────────────────────────────
 // Pass when the live score holds >= PASS_THRESHOLD continuously for HOLD_MS.
@@ -24,13 +32,16 @@ const PASS_THRESHOLD = 70;
 const HOLD_MS = 800;
 const SMOOTH_WINDOW = 10; // frames of score smoothing, as in the spike
 const REST_THRESHOLD = 6; // suggest a rest day at this many consecutive days
+const COMPLETE_THRESHOLD = 80; // a move is "completed" once its best score crosses this
 const WARMUP_KEY = "dancemore_warmedUpDate";
 
 type View =
   | { kind: "library" }
+  | { kind: "upload" }
+  | { kind: "watch"; move: Move }
   | { kind: "warmup"; move: Move }
   | { kind: "practice"; move: Move }
-  | { kind: "result"; move: Move; peaks: number[] }
+  | { kind: "result"; move: Move; peaks: number[]; firstCompletion: boolean }
   | { kind: "dashboard" };
 
 export default function Page() {
@@ -52,31 +63,67 @@ export default function Page() {
       );
   }, []);
 
-  // Rest-day nudge: fetch the streak once per login; dismiss for the session.
-  const [streak, setStreak] = useState(0);
+  // Session-uploaded moves (object-URL backed; gone on reload by design).
+  const [uploadedMoves, setUploadedMoves] = useState<Move[]>([]);
+  const allMoves = useMemo(
+    () => (moves ? [...moves, ...uploadedMoves] : null),
+    [moves, uploadedMoves]
+  );
+  const uploadedIds = useMemo(
+    () => new Set(uploadedMoves.map((m) => m.id)),
+    [uploadedMoves]
+  );
+
+  // Stats power the rest-day nudge, completion badges, and the celebration's
+  // "prior best". Refetched on every Library/Dashboard entry so badges update
+  // after each saved attempt; the snapshot taken before practice is what
+  // "already completed?" is judged against.
+  const [stats, setStats] = useState<Stats | null>(null);
   const [nudgeDismissed, setNudgeDismissed] = useState(false);
   useEffect(() => {
     if (!authed) return;
+    if (view.kind !== "library" && view.kind !== "dashboard") return;
     let cancelled = false;
     getStats()
       .then((s) => {
-        if (!cancelled) setStreak(s.current_streak);
+        if (!cancelled) setStats(s);
       })
-      .catch(() => {}); // banner is best-effort; never block the app
+      .catch(() => {}); // best-effort; never block the app
     return () => {
       cancelled = true;
     };
-  }, [authed]);
+  }, [authed, view.kind]);
+
+  const streak = stats?.current_streak ?? 0;
+  const bestScores = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const m of stats?.moves ?? []) map[m.move_id] = m.best_score;
+    return map;
+  }, [stats]);
+  // Moves celebrated this session — guards against re-triggering on "Try
+  // Again" before the stats snapshot refreshes.
+  const celebratedRef = useRef<Set<string>>(new Set());
+
   const showNudge =
     authed &&
     !nudgeDismissed &&
     streak >= REST_THRESHOLD &&
     (view.kind === "library" || view.kind === "dashboard");
 
+  // Picking a move: Watch → Do → Get scored. Moves without a demo clip skip
+  // the watch beat entirely.
+  function startMove(move: Move) {
+    if (move.demoVideo) {
+      setView({ kind: "watch", move });
+    } else {
+      proceedToPractice(move);
+    }
+  }
+
   // Warmup: gate the FIRST practice of a calendar day; skipping holds for the
   // rest of the browser session.
   const warmupSkippedRef = useRef(false);
-  function startMove(move: Move) {
+  function proceedToPractice(move: Move) {
     const warmedUpToday =
       typeof window !== "undefined" &&
       localStorage.getItem(WARMUP_KEY) === new Date().toDateString();
@@ -90,8 +137,14 @@ export default function Page() {
   function logout() {
     clearToken(); // emits a token change; authed recomputes to false
     setView({ kind: "library" });
-    setStreak(0);
+    setStats(null);
     setNudgeDismissed(false);
+    celebratedRef.current.clear();
+    // Uploaded moves are session-and-account scoped: drop them (and their
+    // object URLs) so they don't appear as "Yours" to the next login.
+    for (const m of uploadedMoves)
+      if (m.demoVideo?.startsWith("blob:")) URL.revokeObjectURL(m.demoVideo);
+    setUploadedMoves([]);
   }
 
   return (
@@ -151,10 +204,41 @@ export default function Page() {
         />
       )}
 
-      {authed && view.kind === "dashboard" && <Dashboard />}
+      {authed && view.kind === "dashboard" && (
+        <Dashboard
+          libraryMoveIds={(allMoves ?? []).map((m) => m.id)}
+          completeThreshold={COMPLETE_THRESHOLD}
+        />
+      )}
 
       {authed && view.kind === "library" && (
-        <Library moves={moves} loadError={loadError} onPick={startMove} />
+        <Library
+          moves={allMoves}
+          loadError={loadError}
+          onPick={startMove}
+          onUpload={() => setView({ kind: "upload" })}
+          bestScores={bestScores}
+          completeThreshold={COMPLETE_THRESHOLD}
+          uploadedIds={uploadedIds}
+        />
+      )}
+
+      {authed && view.kind === "upload" && (
+        <UploadMove
+          onSave={(move) => {
+            setUploadedMoves((prev) => [...prev, move]);
+            setView({ kind: "library" });
+          }}
+          onCancel={() => setView({ kind: "library" })}
+        />
+      )}
+
+      {authed && view.kind === "watch" && (
+        <Watch
+          move={view.move}
+          onPractice={() => proceedToPractice(view.move)}
+          onBack={() => setView({ kind: "library" })}
+        />
       )}
 
       {authed && view.kind === "warmup" && (
@@ -174,10 +258,28 @@ export default function Page() {
         <Practice
           key={view.move.id}
           move={view.move}
-          onFinish={(peaks) =>
-            setView({ kind: "result", move: view.move, peaks })
-          }
+          onFinish={(peaks) => {
+            // First-completion is decided HERE, against the stats snapshot
+            // taken before this attempt (plus a session guard so "Try Again"
+            // can't re-trigger it before stats refresh).
+            const overall =
+              peaks.length > 0
+                ? Math.round(peaks.reduce((s, v) => s + v, 0) / peaks.length)
+                : 0;
+            const priorBest = bestScores[view.move.id] ?? 0;
+            const firstCompletion =
+              overall >= COMPLETE_THRESHOLD &&
+              priorBest < COMPLETE_THRESHOLD &&
+              !celebratedRef.current.has(view.move.id);
+            if (firstCompletion) celebratedRef.current.add(view.move.id);
+            setView({ kind: "result", move: view.move, peaks, firstCompletion });
+          }}
           onBack={() => setView({ kind: "library" })}
+          onRewatch={
+            view.move.demoVideo
+              ? () => setView({ kind: "watch", move: view.move })
+              : undefined
+          }
         />
       )}
 
@@ -185,6 +287,7 @@ export default function Page() {
         <Result
           move={view.move}
           peaks={view.peaks}
+          firstCompletion={view.firstCompletion}
           onRetry={() => setView({ kind: "practice", move: view.move })}
           onBack={() => setView({ kind: "library" })}
         />
@@ -238,15 +341,127 @@ function RestDayBanner({
   );
 }
 
+// ── WATCH ───────────────────────────────────────────────────────────────────
+// The "learn it" beat: loop the demo clip with controls. No camera here —
+// detection only spins up when PRACTICE mounts.
+function Watch({
+  move,
+  onPractice,
+  onBack,
+}: {
+  move: Move;
+  onPractice: () => void;
+  onBack: () => void;
+}) {
+  const [clipMissing, setClipMissing] = useState(false);
+
+  return (
+    <>
+      <div style={{ width: "100%", textAlign: "center" }}>
+        <div style={{ fontSize: "1.35rem", fontWeight: 700 }}>{move.name}</div>
+        {move.description && (
+          <div style={{ color: "#888", marginTop: 2 }}>{move.description}</div>
+        )}
+      </div>
+
+      <div
+        style={{
+          position: "relative",
+          width: "100%",
+          aspectRatio: "4 / 3",
+          background: "#000",
+          borderRadius: 8,
+          overflow: "hidden",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {clipMissing ? (
+          <div style={{ color: "#888", textAlign: "center", padding: 24 }}>
+            <div style={{ fontSize: "2rem", marginBottom: 8 }}>🎬</div>
+            Demo clip coming soon.
+            <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 6 }}>
+              ({move.demoVideo} not found)
+            </div>
+          </div>
+        ) : (
+          <video
+            src={move.demoVideo}
+            autoPlay
+            muted
+            loop
+            controls
+            playsInline
+            onError={() => setClipMissing(true)}
+            style={{ width: "100%", height: "100%", objectFit: "contain" }}
+          />
+        )}
+      </div>
+
+      <button
+        onClick={onPractice}
+        style={{
+          padding: "12px 28px",
+          fontSize: "1rem",
+          fontWeight: 700,
+          borderRadius: 8,
+          border: "1px solid #14532d",
+          background: "#16a34a",
+          color: "#04130a",
+          cursor: "pointer",
+        }}
+      >
+        Practice this move →
+      </button>
+
+      <div style={{ display: "flex", gap: 20 }}>
+        <button
+          onClick={onPractice}
+          style={{
+            background: "none",
+            border: "none",
+            color: "#666",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+          }}
+        >
+          Skip
+        </button>
+        <button
+          onClick={onBack}
+          style={{
+            background: "none",
+            border: "none",
+            color: "#666",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+          }}
+        >
+          Back to Moves
+        </button>
+      </div>
+    </>
+  );
+}
+
 // ── LIBRARY ─────────────────────────────────────────────────────────────────
 function Library({
   moves,
   loadError,
   onPick,
+  onUpload,
+  bestScores,
+  completeThreshold,
+  uploadedIds,
 }: {
   moves: Move[] | null;
   loadError: string | null;
   onPick: (move: Move) => void;
+  onUpload: () => void;
+  bestScores: Record<string, number>;
+  completeThreshold: number;
+  uploadedIds: Set<string>;
 }) {
   if (loadError)
     return <p style={{ color: "#ef4444" }}>Couldn’t load moves: {loadError}</p>;
@@ -288,11 +503,50 @@ function Library({
                 Practice →
               </span>
             </div>
-            <div style={{ color: "#888", fontSize: "0.9rem" }}>
-              {move.checkpoints.length} poses
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                color: "#888",
+                fontSize: "0.9rem",
+              }}
+            >
+              <span>{move.checkpoints.length} poses</span>
+              {move.demoVideo && (
+                <span style={chip("#22d3ee", "#164e63")}>▶ Watch</span>
+              )}
+              {uploadedIds.has(move.id) && (
+                <span style={chip("#a78bfa", "#4c1d95")}>Yours</span>
+              )}
+              {(bestScores[move.id] ?? 0) >= completeThreshold && (
+                <span style={chip("#4ade80", "#14532d")}>✓ Completed</span>
+              )}
             </div>
           </button>
         ))}
+
+        {/* Upload entry — turns any clip into a practicable move. */}
+        <button
+          className="moveCard"
+          onClick={onUpload}
+          style={{
+            ...card,
+            textAlign: "center",
+            cursor: "pointer",
+            border: "2px dashed #333",
+            background: "transparent",
+            color: "#888",
+            alignItems: "center",
+          }}
+        >
+          <span style={{ fontSize: "1.05rem", fontWeight: 700 }}>
+            ⬆ Upload a dance
+          </span>
+          <span style={{ fontSize: "0.85rem" }}>
+            We’ll extract its key poses so you can practice it
+          </span>
+        </button>
       </div>
       <Link
         href="/author"
@@ -309,10 +563,12 @@ function Practice({
   move,
   onFinish,
   onBack,
+  onRewatch,
 }: {
   move: Move;
   onFinish: (peaks: number[]) => void;
   onBack: () => void;
+  onRewatch?: () => void;
 }) {
   const [index, setIndex] = useState(0);
   const checkpoint = move.checkpoints[index];
@@ -351,7 +607,7 @@ function Practice({
     }
   }
 
-  const { videoRef, canvasRef, ready, error } = usePoseDetection(
+  const { videoRef, canvasRef, ready, error, ghostRef } = usePoseDetection(
     (_kp, angles) => {
       const raw = scorePose(checkpoint.angles, angles);
 
@@ -409,6 +665,12 @@ function Practice({
     }
   );
 
+  // Show the current checkpoint's target pose as a ghost on the camera.
+  // Checkpoints without stored keypoints (legacy/placeholder) → no ghost.
+  useEffect(() => {
+    ghostRef.current = checkpoint.keypoints ?? null;
+  }, [checkpoint, ghostRef]);
+
   return (
     <>
       <div style={{ width: "100%", textAlign: "center" }}>
@@ -418,6 +680,24 @@ function Practice({
           <span style={{ color: "#22d3ee", fontWeight: 600 }}>
             {checkpoint.name}
           </span>
+          {onRewatch && (
+            <>
+              {" · "}
+              <button
+                onClick={onRewatch}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "#666",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                  padding: 0,
+                }}
+              >
+                ↺ Rewatch demo
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -483,6 +763,14 @@ function Practice({
         </div>
       </CameraStage>
 
+      {checkpoint.keypoints && (
+        <div style={{ color: "#888", fontSize: "0.8rem" }}>
+          <span style={{ color: "#ff40ff" }}>⬤</span> target pose ·{" "}
+          <span style={{ color: "cyan" }}>⬤</span> you — line yourself up with
+          the glow
+        </div>
+      )}
+
       <div ref={bestRef} style={{ color: "#888", fontSize: "0.9rem" }}>
         Best: 0
       </div>
@@ -503,11 +791,13 @@ function Practice({
 function Result({
   move,
   peaks,
+  firstCompletion,
   onRetry,
   onBack,
 }: {
   move: Move;
   peaks: number[];
+  firstCompletion: boolean;
   onRetry: () => void;
   onBack: () => void;
 }) {
@@ -541,6 +831,24 @@ function Result({
   return (
     <>
       <div style={{ fontSize: "1.25rem", fontWeight: 700 }}>{move.name}</div>
+
+      {firstCompletion && (
+        <div
+          style={{
+            width: "100%",
+            textAlign: "center",
+            padding: "14px 16px",
+            borderRadius: 8,
+            border: "1px solid #14532d",
+            background: "linear-gradient(180deg, #0c1f13 0%, #111 100%)",
+            color: "#4ade80",
+            fontWeight: 700,
+          }}
+        >
+          🎉 You’ve mastered this move!
+        </div>
+      )}
+
       <div style={{ color: "#888" }}>Overall score</div>
       <div
         style={{
@@ -601,6 +909,15 @@ function Result({
     </>
   );
 }
+
+const chip = (color: string, border: string): React.CSSProperties => ({
+  fontSize: "0.75rem",
+  fontWeight: 600,
+  color,
+  border: `1px solid ${border}`,
+  borderRadius: 999,
+  padding: "1px 8px",
+});
 
 const navBtn = (active: boolean): React.CSSProperties => ({
   padding: "6px 12px",

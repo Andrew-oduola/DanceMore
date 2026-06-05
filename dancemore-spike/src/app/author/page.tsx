@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { CameraStage } from "@/components/CameraStage";
 import type { Checkpoint, Move } from "@/lib/moves";
+import type { KP } from "@/lib/pose";
 
 // Developer plumbing — not part of the client-facing UX. Capture the live pose
 // as checkpoints, then export a complete Move as JSON to paste into moves.json.
@@ -13,11 +14,14 @@ export default function AuthorPage() {
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [note, setNote] = useState("");
 
-  // Latest angle-vector, updated every frame but kept out of React state.
+  // Latest angle-vector + raw keypoints, updated every frame but kept out of
+  // React state. Keypoints ride along on the checkpoint for the ghost overlay.
   const anglesRef = useRef<Record<number, number>>({});
+  const keypointsRef = useRef<KP[]>([]);
   const { videoRef, canvasRef, ready, error } = usePoseDetection(
-    (_kp, angles) => {
+    (kp, angles) => {
       anglesRef.current = angles;
+      keypointsRef.current = kp;
     }
   );
 
@@ -29,7 +33,11 @@ export default function AuthorPage() {
     }
     setCheckpoints((prev) => [
       ...prev,
-      { name: `Pose ${prev.length + 1}`, angles: { ...angles } },
+      {
+        name: `Pose ${prev.length + 1}`,
+        angles: { ...angles },
+        keypoints: keypointsRef.current.map((k) => ({ ...k })),
+      },
     ]);
     setNote(`Captured (${Object.keys(angles).length} joints).`);
   }

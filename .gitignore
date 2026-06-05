@@ -18,3 +18,4 @@ staticfiles/
 .claude/
 shot_*.png
 e2e_demo_dashboard.png
+test-fixtures/
