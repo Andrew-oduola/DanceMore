@@ -17,5 +17,6 @@ staticfiles/
 # Local tooling artifacts
 .claude/
 shot_*.png
+dbg_*.png
 e2e_demo_dashboard.png
 test-fixtures/

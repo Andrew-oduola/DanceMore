@@ -21,7 +21,12 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
       `--use-file-for-fake-video-capture=${Y4M}`,
     ],
   });
-  const ctx = await browser.newContext({ permissions: ["camera"] });
+  // reducedMotion keeps hover/width transitions from confusing Playwright's
+  // actionability checks while the CPU pose-inference loop hogs the main thread.
+  const ctx = await browser.newContext({
+    permissions: ["camera"],
+    reducedMotion: "reduce",
+  });
   await ctx.addInitScript(() => {
     window.__gumCalls = 0;
     window.__streams = [];
@@ -117,7 +122,7 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
   );
 
   // rewatch round-trip releases the camera
-  await page.click("text=↺ Rewatch demo");
+  await page.click("text=↺ Rewatch demo", { force: true }); // inference loop saturates main thread
   await page.waitForSelector('button:has-text("Practice this move")');
   await page.waitForTimeout(600);
   check("practice camera tracks stopped on WATCH", (await liveTracks()) === 0);
@@ -126,7 +131,7 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
 
   // skip through (starter checkpoints won't match the warrior pose)
   for (let i = 0; i < 3; i++) {
-    await page.click('button:has-text("Skip / Next")');
+    await page.click('button:has-text("Skip / Next")', { force: true });
     await page.waitForTimeout(400);
   }
   await page.waitForSelector("text=Overall score");
@@ -141,14 +146,14 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
   );
 
   // ── No-clip fallback (Drew Test) ──
-  await page.click('button:has-text("Back to Moves")');
+  await page.click('button:has-text("Back to Moves")', { force: true });
   await page.click("text=Drew Test");
   await page.waitForSelector("text=Pose 1 of 3");
   check(
     "move without demoVideo skips WATCH",
     !(await page.isVisible('button:has-text("Practice this move")'))
   );
-  await page.click('button:has-text("Back to Moves")');
+  await page.click('button:has-text("Back to Moves")', { force: true });
 
   // ── PHASE 5: upload a dance ──
   await page.click("text=⬆ Upload a dance");
@@ -291,7 +296,7 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
   );
 
   // ── 5.5: library badge + dashboard count reflect the new best ──
-  await page.click('button:has-text("Back to Moves")');
+  await page.click('button:has-text("Back to Moves")', { force: true });
   await page.waitForSelector("text=Pick a move to practice");
   await page.waitForTimeout(1000); // stats refetch
   const completedBadges = await page.locator("text=✓ Completed").count();
@@ -309,11 +314,21 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
     dashText.includes("My Warrior Dance ✓") || /My Warrior Dance\s*✓/.test(dashText)
   );
 
-  // ── Logout / demo account regression ──
+  // ── Logout (with confirmation) / demo account regression ──
   await page.click('button:has-text("Logout")');
+  await page.waitForSelector("text=Are you sure you want to log out?");
+  check("logout shows confirmation dialog", true);
+  await page.click('button:has-text("Cancel")');
+  await page.waitForTimeout(300);
+  check(
+    "Cancel keeps the session",
+    await page.evaluate(() => localStorage.getItem("dancemore_token") !== null)
+  );
+  await page.click('button:has-text("Logout")');
+  await page.click('button:has-text("Log out")'); // dialog confirm
   await page.waitForSelector('input[placeholder="Username"]');
   check(
-    "logout clears token",
+    "confirming logs out and clears token",
     await page.evaluate(() => localStorage.getItem("dancemore_token") === null)
   );
 

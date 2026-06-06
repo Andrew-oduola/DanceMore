@@ -9,7 +9,7 @@ import {
 } from "react";
 import Link from "next/link";
 import { scorePose } from "@/lib/pose";
-import { loadMoves, type Move } from "@/lib/moves";
+import { loadMoves, validYoutubeId, type Move } from "@/lib/moves";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { CameraStage } from "@/components/CameraStage";
 import { scoreColor } from "@/lib/scoreColor";
@@ -110,10 +110,10 @@ export default function Page() {
     streak >= REST_THRESHOLD &&
     (view.kind === "library" || view.kind === "dashboard");
 
-  // Picking a move: Watch → Do → Get scored. Moves without a demo clip skip
-  // the watch beat entirely.
+  // Picking a move: Watch → Do → Get scored. Moves without any demo (YouTube
+  // or self-hosted clip) skip the watch beat entirely.
   function startMove(move: Move) {
-    if (move.demoVideo) {
+    if (validYoutubeId(move) || move.demoVideo) {
       setView({ kind: "watch", move });
     } else {
       proceedToPractice(move);
@@ -134,7 +134,10 @@ export default function Page() {
     }
   }
 
+  // Logout asks for confirmation first; only confirming clears the session.
+  const [confirmingLogout, setConfirmingLogout] = useState(false);
   function logout() {
+    setConfirmingLogout(false);
     clearToken(); // emits a token change; authed recomputes to false
     setView({ kind: "library" });
     setStats(null);
@@ -186,10 +189,68 @@ export default function Page() {
             >
               Dashboard
             </button>
-            <button onClick={logout} style={navBtn(false)}>
+            <button
+              onClick={() => setConfirmingLogout(true)}
+              style={navBtn(false)}
+            >
               Logout
             </button>
           </nav>
+        </div>
+      )}
+
+      {confirmingLogout && (
+        <div
+          onClick={() => setConfirmingLogout(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 50,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.65)",
+            padding: 24,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            style={{
+              width: "100%",
+              maxWidth: 360,
+              display: "flex",
+              flexDirection: "column",
+              gap: 16,
+              padding: 24,
+              borderRadius: 12,
+              border: "1px solid #333",
+              background: "#111",
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: "1.05rem" }}>
+              Are you sure you want to log out?
+            </div>
+            <div style={{ display: "flex", gap: 12, justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setConfirmingLogout(false)}
+                style={{ ...btn, background: "#111" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={logout}
+                style={{
+                  ...btn,
+                  background: "#7f1d1d",
+                  border: "1px solid #991b1b",
+                }}
+              >
+                Log out
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -276,7 +337,7 @@ export default function Page() {
           }}
           onBack={() => setView({ kind: "library" })}
           onRewatch={
-            view.move.demoVideo
+            view.move.demoVideo || validYoutubeId(view.move)
               ? () => setView({ kind: "watch", move: view.move })
               : undefined
           }
@@ -292,6 +353,19 @@ export default function Page() {
           onBack={() => setView({ kind: "library" })}
         />
       )}
+
+      <footer
+        style={{
+          marginTop: "auto",
+          paddingTop: 24,
+          color: "#555",
+          fontSize: "0.72rem",
+          textAlign: "center",
+        }}
+      >
+        Some demo videos are embedded from YouTube in privacy-enhanced
+        (no-cookie) mode. Your camera feed never leaves this device.
+      </footer>
     </main>
   );
 }
@@ -354,6 +428,10 @@ function Watch({
   onBack: () => void;
 }) {
   const [clipMissing, setClipMissing] = useState(false);
+  // Precedence: YouTube embed → self-hosted clip → "coming soon" panel.
+  // The YouTube iframe is WATCH-ONLY: cross-origin, never pose-analyzed —
+  // scoring always uses the move's stored checkpoints.
+  const youtubeId = validYoutubeId(move);
 
   return (
     <>
@@ -364,40 +442,69 @@ function Watch({
         )}
       </div>
 
-      <div
-        style={{
-          position: "relative",
-          width: "100%",
-          aspectRatio: "4 / 3",
-          background: "#000",
-          borderRadius: 8,
-          overflow: "hidden",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        {clipMissing ? (
-          <div style={{ color: "#888", textAlign: "center", padding: 24 }}>
-            <div style={{ fontSize: "2rem", marginBottom: 8 }}>🎬</div>
-            Demo clip coming soon.
-            <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 6 }}>
-              ({move.demoVideo} not found)
-            </div>
-          </div>
-        ) : (
-          <video
-            src={move.demoVideo}
-            autoPlay
-            muted
-            loop
-            controls
-            playsInline
-            onError={() => setClipMissing(true)}
-            style={{ width: "100%", height: "100%", objectFit: "contain" }}
+      {youtubeId ? (
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            aspectRatio: "16 / 9",
+            background: "#000",
+            borderRadius: 8,
+            overflow: "hidden",
+          }}
+        >
+          <iframe
+            src={`https://www.youtube-nocookie.com/embed/${youtubeId}`}
+            title={`${move.name} demo`}
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              border: 0,
+            }}
           />
-        )}
-      </div>
+        </div>
+      ) : (
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            aspectRatio: "4 / 3",
+            background: "#000",
+            borderRadius: 8,
+            overflow: "hidden",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {!move.demoVideo || clipMissing ? (
+            <div style={{ color: "#888", textAlign: "center", padding: 24 }}>
+              <div style={{ fontSize: "2rem", marginBottom: 8 }}>🎬</div>
+              Demo clip coming soon.
+              {move.demoVideo && (
+                <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 6 }}>
+                  ({move.demoVideo} not found)
+                </div>
+              )}
+            </div>
+          ) : (
+            <video
+              src={move.demoVideo}
+              autoPlay
+              muted
+              loop
+              controls
+              playsInline
+              onError={() => setClipMissing(true)}
+              style={{ width: "100%", height: "100%", objectFit: "contain" }}
+            />
+          )}
+        </div>
+      )}
 
       <button
         onClick={onPractice}
@@ -513,7 +620,7 @@ function Library({
               }}
             >
               <span>{move.checkpoints.length} poses</span>
-              {move.demoVideo && (
+              {(move.demoVideo || validYoutubeId(move)) && (
                 <span style={chip("#22d3ee", "#164e63")}>▶ Watch</span>
               )}
               {uploadedIds.has(move.id) && (

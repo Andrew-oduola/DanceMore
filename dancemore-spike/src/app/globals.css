@@ -38,24 +38,35 @@ body {
 a {
   color: inherit;
   text-decoration: none;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    filter 0.15s ease;
 }
 
 a:hover {
-  color: var(--foreground);
+  color: var(--accent);
 }
 
-/* Cohesive interactive feel across all (inline-styled) buttons and inputs. */
+/* Cohesive interactive feel across all (inline-styled) buttons and inputs:
+   every clickable element brightens smoothly on hover and shows a pointer. */
 button {
   font-family: inherit;
+  cursor: pointer;
   transition:
     border-color 0.15s ease,
     background-color 0.15s ease,
     color 0.15s ease,
+    filter 0.15s ease,
     transform 0.1s ease;
 }
 
+button:disabled {
+  cursor: not-allowed;
+}
+
 button:hover:not(:disabled) {
-  border-color: #666 !important;
+  filter: brightness(1.25);
 }
 
 button:active:not(:disabled) {
@@ -89,6 +100,17 @@ button:focus-visible {
 .moveCard:hover {
   background: #222 !important;
   transform: translateY(-2px);
+}
+
+/* Honor reduced-motion preferences (also keeps automated tests deterministic
+   when the pose-inference loop saturates the main thread). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
 
 /* The DanceMore wordmark: cyan→green gradient text (skeleton + score colors). */
