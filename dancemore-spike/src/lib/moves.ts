@@ -25,10 +25,17 @@ export type Move = {
 };
 
 // A youtubeId that's actually usable (placeholder values don't count).
+// Accepts a bare video ID or a pasted URL in any common shape —
+// youtu.be/<id>, watch?v=<id>, shorts/<id>, embed/<id> — and returns the
+// bare ID the nocookie embed needs.
 export function validYoutubeId(move: Move): string | undefined {
-  return move.youtubeId && move.youtubeId !== "REPLACE_ME"
-    ? move.youtubeId
-    : undefined;
+  const raw = move.youtubeId?.trim();
+  if (!raw || raw === "REPLACE_ME") return undefined;
+  const fromUrl = raw.match(
+    /(?:youtu\.be\/|[?&]v=|shorts\/|embed\/)([A-Za-z0-9_-]{6,})/
+  );
+  if (fromUrl) return fromUrl[1];
+  return /^[A-Za-z0-9_-]{6,}$/.test(raw) ? raw : undefined;
 }
 
 // Loads the move library shipped in public/moves.json.

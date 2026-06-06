@@ -5,7 +5,7 @@
     "description": "Step side to side, reaching across your body on each step.",
     "demoVideo": "/videos/side-step-reach.mp4",
     "_comment": "Paste a real YouTube video ID into youtubeId below (the part after v= in the URL). REPLACE_ME is ignored and the demoVideo file plays instead.",
-    "youtubeId": "REPLACE_ME",
+    "youtubeId": "https://youtu.be/ujREEgxEP7g?si=EhytxR2x_hss54gU",
     "checkpoints": [
       {
         "name": "Neutral",
@@ -27,7 +27,7 @@
     "description": "Bounce on the beat, sweeping both arms from your sides to overhead.",
     "demoVideo": "/videos/arms-up-bounce.mp4",
     "_comment": "Paste a real YouTube video ID into youtubeId below. REPLACE_ME is ignored.",
-    "youtubeId": "REPLACE_ME",
+    "youtubeId": "https://youtu.be/NM-2XSQc2q0?si=xxaOVK-qsqVaN2_k",
     "checkpoints": [
       {
         "name": "Arms Down",
@@ -45,7 +45,7 @@
     "description": "March in place, lifting each knee to hip height with a steady rhythm.",
     "demoVideo": "/videos/knee-lift-march.mp4",
     "_comment": "Paste a real YouTube video ID into youtubeId below. REPLACE_ME is ignored.",
-    "youtubeId": "REPLACE_ME",
+    "youtubeId": "https://youtu.be/OZEk_ztv8ww?si=IDgiIAXTYe7UGjhL",
     "checkpoints": [
       {
         "name": "Stand",
