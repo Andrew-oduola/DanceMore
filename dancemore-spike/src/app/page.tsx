@@ -714,8 +714,8 @@ function Practice({
     }
   }
 
-  const { videoRef, canvasRef, ready, error, ghostRef } = usePoseDetection(
-    (_kp, angles) => {
+  const { videoRef, canvasRef, ready, error, errorKind, retry, ghostRef } =
+    usePoseDetection((_kp, angles) => {
       const raw = scorePose(checkpoint.angles, angles);
 
       // Smooth the score over a short window (mirrors the spike).
@@ -815,6 +815,8 @@ function Practice({
         canvasRef={canvasRef}
         ready={ready}
         error={error}
+        errorKind={errorKind}
+        onRetry={retry}
       >
         <div
           style={{

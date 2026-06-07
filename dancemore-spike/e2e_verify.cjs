@@ -91,19 +91,16 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
   check(`'▶ Watch' badges (found ${badges}, expect 3)`, badges === 3);
 
   // ── Watch → warmup → practice (starter move; low scores → manual skip) ──
+  // Starters now carry real youtubeIds, so WATCH renders the privacy-enhanced
+  // embed (the self-hosted <video> path is still covered by the uploaded move).
   await page.click("text=Side Step Reach");
   await page.waitForSelector("text=Step side to side");
   const video = page.locator("video");
-  await page.waitForTimeout(700);
-  const vState = await video.evaluate((v) => ({
-    loop: v.loop,
-    controls: v.controls,
-    paused: v.paused,
-    time: v.currentTime,
-  }));
+  const iframeSrc = await page.locator("iframe").getAttribute("src");
   check(
-    `WATCH plays demo clip (loop=${vState.loop}, t=${vState.time.toFixed(2)})`,
-    vState.loop && vState.controls && !vState.paused && vState.time > 0
+    `WATCH renders youtube-nocookie embed (${iframeSrc})`,
+    !!iframeSrc &&
+      iframeSrc.startsWith("https://www.youtube-nocookie.com/embed/ujREEgxEP7g")
   );
   check("camera NOT active during WATCH", (await gumCalls()) === 0);
 
@@ -182,16 +179,32 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
   if ((await keepBtns.count()) > 0) await keepBtns.first().click();
   check("removed candidate can be kept again (3 kept)", (await removeBtns.count()) === 3);
 
-  // hand-pick one via the scrubber
-  await video.evaluate((v) => (v.currentTime = v.duration / 2));
-  await page.waitForTimeout(400);
-  await page.click('button:has-text("Capture this frame")');
-  await page.waitForFunction(
-    (n) => document.querySelectorAll('input[aria-label="Checkpoint name"]').length === n + 1,
-    await thumbs().count(),
-    { timeout: 60000 }
+  // hand-pick one via the scrubber. Wait for the frame to actually settle
+  // (seeked) before capturing; under heavy CPU load retry the click once.
+  const beforeCount = await thumbs().count();
+  await video.evaluate(
+    (v) =>
+      new Promise((res) => {
+        v.pause();
+        v.addEventListener("seeked", () => res(), { once: true });
+        v.currentTime = v.duration / 2;
+      })
   );
-  check("scrubber capture adds a checkpoint", true);
+  let captured = false;
+  for (let attempt = 0; attempt < 2 && !captured; attempt++) {
+    await page.click('button:has-text("Capture this frame")');
+    captured = await page
+      .waitForFunction(
+        (n) =>
+          document.querySelectorAll('input[aria-label="Checkpoint name"]')
+            .length === n + 1,
+        beforeCount,
+        { timeout: 30000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+  }
+  check("scrubber capture adds a checkpoint", captured);
 
   // mirror toggle exercises (leave OFF — webcam pose has same orientation)
   await page.click("text=Dancer faces me (mirror)");
@@ -361,9 +374,95 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
   check(`dashboard chart renders (dots=${dots}, expect ≥33)`, dots >= 33);
   await page.screenshot({ path: "shot_dashboard.png", fullPage: true });
 
+  // ── Camera-deny recovery ──
+  // Real browsers throw NotAllowedError when the user denies; headless
+  // Chromium can't reproduce that exact name (and a fake-device-only browser
+  // can't getUserMedia headlessly at all). So in a fresh context of the MAIN
+  // browser (which has a working fake camera) we stub getUserMedia to reject
+  // ONCE with a genuine NotAllowedError, then delegate to the real camera —
+  // exercising classify → overlay → "Try again" → resume deterministically.
+  const deniedCtx = await browser.newContext({
+    permissions: ["camera"],
+    reducedMotion: "reduce",
+  });
+  await deniedCtx.addInitScript(() => {
+    // Patch at the prototype level — an instance own-property override does
+    // not reliably intercept the call. Deny every call until the test flips
+    // window.__allowCam (robust against React StrictMode's double-mount, which
+    // would otherwise consume a fixed denial count and succeed on remount).
+    const md = navigator.mediaDevices;
+    const proto = Object.getPrototypeOf(md);
+    const real = md.getUserMedia.bind(md);
+    window.__allowCam = false;
+    Object.defineProperty(proto, "getUserMedia", {
+      configurable: true,
+      writable: true,
+      value: (c) =>
+        window.__allowCam
+          ? real(c)
+          : Promise.reject(
+              new DOMException("Permission denied", "NotAllowedError")
+            ),
+    });
+  });
+  const p2 = await deniedCtx.newPage();
+  await p2.goto("http://localhost:3000/");
+  await p2.fill('input[placeholder="Username"]', "demo");
+  await p2.fill('input[placeholder="Password"]', "demo1234");
+  await p2.click('button:has-text("Log in")');
+  await p2.waitForSelector("text=Pick a move to practice");
+  await p2.click("text=Side Step Reach");
+  await p2.click('button:has-text("Practice this move")');
+  await p2.waitForSelector("text=Warm up first");
+  await p2.click("text=Skip for now");
+  await p2.waitForSelector("text=Pose 1 of 3");
+  const overlayShown = await p2
+    .waitForSelector("text=Your browser is blocking the camera", {
+      timeout: 20000,
+    })
+    .then(() => true)
+    .catch(() => false);
+  check("camera denied → friendly recovery overlay (not a dead end)", overlayShown);
+  check(
+    "…overlay has a Try again button",
+    await p2.isVisible('button:has-text("Try again")')
+  );
+  check(
+    "…overlay has unblock instructions",
+    await p2.isVisible("text=address bar")
+  );
+  check(
+    "…overlay has a Reload page button",
+    await p2.isVisible('button:has-text("Reload page")')
+  );
+  await p2.screenshot({ path: "shot_camera_denied.png" });
+
+  // Unblock (what allowing via the address bar does), then "Try again" must
+  // resume the live feed + detection.
+  await p2.evaluate(() => {
+    window.__allowCam = true;
+  });
+  await p2.click('button:has-text("Try again")', { force: true });
+  const feedBack = await p2
+    .waitForFunction(
+      () => {
+        const t = document.body.innerText;
+        return (
+          !t.includes("Your browser is blocking the camera") &&
+          !t.includes("Loading model…")
+        );
+      },
+      null,
+      { timeout: 120000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  check("Try again → feed + detection resume normally", feedBack);
+  await deniedCtx.close();
+
   await browser.close();
   console.log(
-    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png"
+    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png, shot_camera_denied.png"
   );
   console.log(failures === 0 ? "\nALL E2E CHECKS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

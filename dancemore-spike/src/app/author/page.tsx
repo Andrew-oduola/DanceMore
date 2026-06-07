@@ -18,12 +18,11 @@ export default function AuthorPage() {
   // React state. Keypoints ride along on the checkpoint for the ghost overlay.
   const anglesRef = useRef<Record<number, number>>({});
   const keypointsRef = useRef<KP[]>([]);
-  const { videoRef, canvasRef, ready, error } = usePoseDetection(
-    (kp, angles) => {
+  const { videoRef, canvasRef, ready, error, errorKind, retry } =
+    usePoseDetection((kp, angles) => {
       anglesRef.current = angles;
       keypointsRef.current = kp;
-    }
-  );
+    });
 
   function addCheckpoint() {
     const angles = anglesRef.current;
@@ -105,6 +104,8 @@ export default function AuthorPage() {
         canvasRef={canvasRef}
         ready={ready}
         error={error}
+        errorKind={errorKind}
+        onRetry={retry}
       />
 
       <input

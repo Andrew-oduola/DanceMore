@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 import { createMoveNetDetector } from "@/lib/detector";
 import { angleVector, type KP } from "@/lib/pose";
@@ -12,6 +12,9 @@ const GHOST_FALLBACK_TORSO = 0.18;
 
 // Called once per frame with the latest keypoints and their angle-vector.
 export type OnFrame = (keypoints: KP[], angles: Record<number, number>) => void;
+
+// Why the camera failed — drives the recovery UI in CameraStage.
+export type CameraErrorKind = "denied" | "notfound" | "generic";
 
 // Hip-center + torso length — the anchor used to place and scale the ghost.
 function anchorOf(
@@ -60,6 +63,12 @@ export function usePoseDetection(onFrame?: OnFrame) {
 
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorKind, setErrorKind] = useState<CameraErrorKind | null>(null);
+
+  // Re-callable camera start, wired up inside the effect. Exposed as a stable
+  // `retry` so the error overlay's "Try again" can re-prompt for the camera.
+  const startCameraRef = useRef<(() => void) | null>(null);
+  const retry = useCallback(() => startCameraRef.current?.(), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,7 +198,17 @@ export function usePoseDetection(onFrame?: OnFrame) {
       if (!cancelled) rafRef.current = requestAnimationFrame(loop);
     }
 
-    async function init() {
+    // Re-callable camera + detector start. On success it resumes the normal
+    // flow (live feed + detection loop) exactly as a first-try grant would.
+    let starting = false;
+    async function startCamera() {
+      if (cancelled || starting) return;
+      // Already running? (e.g. a spurious permission-change event) — no-op.
+      if (
+        streamRef.current?.getTracks().some((t) => t.readyState === "live")
+      )
+        return;
+      starting = true;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: true,
@@ -198,6 +217,7 @@ export function usePoseDetection(onFrame?: OnFrame) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
+        streamRef.current?.getTracks().forEach((t) => t.stop());
         streamRef.current = stream;
         const video = videoRef.current;
         if (video) {
@@ -205,23 +225,72 @@ export function usePoseDetection(onFrame?: OnFrame) {
           await video.play();
         }
 
-        const detector = await createMoveNetDetector();
-        if (cancelled) {
-          detector.dispose();
-          return;
+        if (!detectorRef.current) {
+          const detector = await createMoveNetDetector();
+          if (cancelled) {
+            detector.dispose();
+            return;
+          }
+          detectorRef.current = detector;
         }
-        detectorRef.current = detector;
+        setError(null);
+        setErrorKind(null);
         setReady(true);
-        rafRef.current = requestAnimationFrame(loop);
+        if (rafRef.current === null)
+          rafRef.current = requestAnimationFrame(loop);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        if (cancelled) return;
+        const name = err instanceof Error ? err.name : "";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+          setErrorKind("denied");
+          setError("Camera access was denied.");
+        } else if (
+          name === "NotFoundError" ||
+          name === "DevicesNotFoundError"
+        ) {
+          setErrorKind("notfound");
+          setError("No camera was found.");
+        } else {
+          setErrorKind("generic");
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        starting = false;
       }
     }
+    startCameraRef.current = startCamera;
 
-    init();
+    startCamera();
+
+    // Permissions API (when available): if the camera is hard-blocked, surface
+    // the recovery instructions proactively, and auto-restart the feed the
+    // moment the user flips the site setting to Allow. Browsers without the
+    // API (or without 'camera' support) fall back to Try-again + instructions.
+    let permStatus: PermissionStatus | null = null;
+    (async () => {
+      try {
+        if (!navigator.permissions?.query) return;
+        permStatus = await navigator.permissions.query({
+          name: "camera" as PermissionName,
+        });
+        if (cancelled) return;
+        if (permStatus.state === "denied") {
+          setErrorKind("denied");
+          setError("Camera access is blocked.");
+        }
+        permStatus.onchange = () => {
+          // startCamera() no-ops unless we're actually down (guards above).
+          if (!cancelled && permStatus?.state === "granted") startCamera();
+        };
+      } catch {
+        // Permissions API unsupported here — the manual retry path covers it.
+      }
+    })();
 
     return () => {
       cancelled = true;
+      if (permStatus) permStatus.onchange = null;
+      startCameraRef.current = null;
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
       detectorRef.current?.dispose();
@@ -229,5 +298,5 @@ export function usePoseDetection(onFrame?: OnFrame) {
     };
   }, []);
 
-  return { videoRef, canvasRef, ready, error, ghostRef };
+  return { videoRef, canvasRef, ready, error, errorKind, retry, ghostRef };
 }

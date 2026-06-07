@@ -46,6 +46,9 @@ a {
 
 a:hover {
   color: var(--accent);
+  /* Same brightness lift the buttons use — also covers links whose inline
+     color would otherwise override the hover color (e.g. "Author tool →"). */
+  filter: brightness(1.25);
 }
 
 /* Cohesive interactive feel across all (inline-styled) buttons and inputs:
