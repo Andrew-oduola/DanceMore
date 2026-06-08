@@ -12,6 +12,7 @@ const { chromium } = require("playwright");
 
 const Y4M = path.resolve(__dirname, "test-fixtures", "webcam.y4m");
 const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
+const LOWCONF = path.resolve(__dirname, "test-fixtures", "lowconf.mp4");
 
 (async () => {
   const browser = await chromium.launch({
@@ -205,6 +206,10 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
       .catch(() => false);
   }
   check("scrubber capture adds a checkpoint", captured);
+  check(
+    "clean full-body capture shows NO low-confidence hint",
+    !(await page.isVisible("text=Pose looks partly unclear"))
+  );
 
   // mirror toggle exercises (leave OFF — webcam pose has same orientation)
   await page.click("text=Dancer faces me (mirror)");
@@ -373,6 +378,99 @@ const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
   const dots = await page.locator(".recharts-area-dot").count();
   check(`dashboard chart renders (dots=${dots}, expect ≥33)`, dots >= 33);
   await page.screenshot({ path: "shot_dashboard.png", fullPage: true });
+
+  // ── Low-confidence upload: capture never blocks; move still practices ──
+  // lowconf.mp4 is a tight head crop → MoveNet finds <4 confident joints, so
+  // auto-sampling keeps nothing and every manual capture is "low confidence".
+  await page.click('button:has-text("Library")');
+  await page.waitForSelector("text=Pick a move to practice");
+  await page.click("text=⬆ Upload a dance");
+  await page.waitForSelector("text=Choose a video file");
+  await page.setInputFiles('input[type="file"]', LOWCONF);
+  await page.waitForSelector("text=Capture this frame", { timeout: 180000 });
+  check(
+    "low-confidence clip: auto-sampler keeps nothing (selective)",
+    (await page.locator('input[aria-label="Checkpoint name"]').count()) === 0
+  );
+
+  // Capture two frames by hand — neither may be blocked.
+  for (const frac of [0.3, 0.6]) {
+    const n = await page.locator('input[aria-label="Checkpoint name"]').count();
+    await page.locator("video").evaluate(
+      (v, f) =>
+        new Promise((res) => {
+          v.pause();
+          v.addEventListener("seeked", () => res(), { once: true });
+          v.currentTime = v.duration * f;
+        }),
+      frac
+    );
+    await page.click('button:has-text("Capture this frame")');
+    await page.waitForFunction(
+      (k) =>
+        document.querySelectorAll('input[aria-label="Checkpoint name"]')
+          .length === k + 1,
+      n,
+      { timeout: 30000 }
+    );
+  }
+  check("low-confidence frame is captured anyway (no block)", true);
+  check(
+    "…soft, non-blocking hint shown",
+    await page.isVisible("text=Pose looks partly unclear")
+  );
+  check(
+    "…low-confidence checkpoints flagged in the strip",
+    (await page.locator("text=low confidence").count()) >= 1
+  );
+  await page.screenshot({ path: "shot_lowconf.png" });
+
+  await page.fill('input[placeholder^="Move name"]', "Lowconf Move");
+  await page.click('button:has-text("Save move")');
+  await page.waitForSelector('button.moveCard:has-text("Lowconf Move")');
+  check("low-confidence move saved to library", true);
+
+  // Practice it: must run and score without crashing / NaN / hanging.
+  let practiceError = null;
+  const onErr = (e) => (practiceError = e.message);
+  page.on("pageerror", onErr);
+  await page.click("text=Lowconf Move");
+  await page.click('button:has-text("Practice this move")'); // has demoVideo → WATCH
+  if (
+    await page
+      .waitForSelector("text=Warm up first", { timeout: 2000 })
+      .then(() => true)
+      .catch(() => false)
+  )
+    await page.click("text=Skip for now");
+  await page.waitForSelector("text=Pose 1 of 2");
+  await page.waitForTimeout(2500);
+  const scoreText = await page
+    .locator("text=/^(Get into frame|\\d{1,3})$/")
+    .first()
+    .innerText()
+    .catch(() => "");
+  check(
+    `low-conf practice shows a valid score state ("${scoreText}", no NaN)`,
+    /^(Get into frame|\d{1,3})$/.test(scoreText)
+  );
+  for (let i = 0; i < 2; i++) {
+    await page.click('button:has-text("Skip / Next")', { force: true });
+    await page.waitForTimeout(400);
+  }
+  await page.waitForSelector("text=Overall score");
+  const overallLow = await page
+    .locator("text=Overall score")
+    .locator("xpath=following-sibling::div[1]")
+    .innerText()
+    .catch(() => "?");
+  check(
+    `low-conf move reaches RESULT with a finite score ("${overallLow}")`,
+    /^\d{1,3}$/.test(overallLow.trim())
+  );
+  check("no JS error while practicing a low-confidence move", practiceError === null);
+  page.off("pageerror", onErr);
+  await page.click('button:has-text("Back to Moves")', { force: true });
 
   // ── Camera-deny recovery ──
   // Real browsers throw NotAllowedError when the user denies; headless

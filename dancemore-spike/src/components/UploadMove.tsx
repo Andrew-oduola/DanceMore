@@ -46,6 +46,7 @@ export function UploadMove({
   const [description, setDescription] = useState("");
   const [mirror, setMirror] = useState(false);
   const [note, setNote] = useState("");
+  const [lowConfHint, setLowConfHint] = useState(false);
 
   // Tear down the detector; revoke the clip URL only if it wasn't saved into
   // a move (WATCH replays it after save).
@@ -113,11 +114,15 @@ export function UploadMove({
     if (!video || !detector) return;
     video.pause();
     const c = await captureFrame(video, detector);
+    // Never block: only a genuine detector failure (no pose object) stops us.
     if (!c) {
-      setNote("No confident pose on this frame — try another moment.");
+      setNote("");
+      setLowConfHint(false);
       return;
     }
     setNote("");
+    // Soft, non-blocking hint — the frame is captured either way.
+    setLowConfHint(c.lowConfidence);
     setCandidates((prev) => [
       ...prev,
       { ...c, name: `Pose ${prev.length + 1}`, keep: true },
@@ -258,6 +263,19 @@ export function UploadMove({
             📸 Capture this frame as a checkpoint
           </button>
           {note && <div style={{ color: "#f59e0b" }}>{note}</div>}
+          {lowConfHint && (
+            <div
+              style={{
+                color: "#b08534",
+                fontSize: "0.8rem",
+                maxWidth: 420,
+                textAlign: "center",
+              }}
+            >
+              Pose looks partly unclear on this frame — you can still use it,
+              but scoring may be less precise.
+            </div>
+          )}
 
           {candidates.length > 0 && (
             <div
@@ -309,6 +327,11 @@ export function UploadMove({
                         color: "#fff",
                       }}
                     />
+                    {c.lowConfidence && (
+                      <span style={{ color: "#b08534", fontSize: "0.7rem" }}>
+                        ⚠ low confidence
+                      </span>
+                    )}
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span style={{ color: "#666", fontSize: "0.7rem" }}>
                         @{c.time.toFixed(1)}s

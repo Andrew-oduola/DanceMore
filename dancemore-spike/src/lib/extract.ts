@@ -7,12 +7,16 @@ import { angleVector, type KP } from "./pose";
 
 const MIN_CONF = 0.3;
 const THUMB_W = 240;
+// scorePose needs ≥4 shared joints to return a number; below this the frame
+// is "low confidence" — still usable, just less reliable for scoring.
+const MIN_RELIABLE_JOINTS = 4;
 
 export type Candidate = {
   id: number;
   time: number; // seconds into the clip
   angles: Record<number, number>;
   keypoints: KP[]; // raw MoveNet keypoints — stored on the checkpoint for the ghost overlay
+  lowConfidence: boolean; // fewer than MIN_RELIABLE_JOINTS confident joints
   thumb: string; // JPEG data-URL of the frame with the skeleton drawn on it
 };
 
@@ -34,8 +38,13 @@ export async function seekTo(video: HTMLVideoElement, t: number): Promise<void> 
   await new Promise(requestAnimationFrame);
 }
 
-// Estimate the pose on the video's CURRENT frame. Returns null when no person
-// is found or fewer than 4 joints are confident.
+// Estimate the pose on the video's CURRENT frame and ALWAYS return a candidate
+// when a pose is read — flagging `lowConfidence` when fewer than the reliable
+// number of joints are confident, rather than refusing the frame. Each stored
+// keypoint keeps its real confidence score, so downstream consumers
+// (angleVector for scoring, the ghost overlay) already skip the weak joints —
+// nothing bogus is stored as if it were solid. Returns null only when the
+// detector itself fails or yields no pose object at all.
 export async function captureFrame(
   video: HTMLVideoElement,
   detector: poseDetection.PoseDetector
@@ -55,18 +64,19 @@ export async function captureFrame(
     name: k.name ?? "",
   }));
   const angles = angleVector(keypoints);
-  if (Object.keys(angles).length < 4) return null;
   return {
     id: nextId++,
     time: video.currentTime,
     angles,
     keypoints,
+    lowConfidence: Object.keys(angles).length < MIN_RELIABLE_JOINTS,
     thumb: drawThumb(video, keypoints),
   };
 }
 
-// Sample `count` evenly-spaced timestamps across the clip and keep the frames
-// where a pose was confidently detected.
+// Sample `count` evenly-spaced timestamps across the clip and keep only the
+// frames where a pose was CONFIDENTLY detected. (Manual "Capture this frame"
+// is allowed to keep low-confidence frames; auto-sampling stays selective.)
 export async function extractCandidates(
   video: HTMLVideoElement,
   detector: poseDetection.PoseDetector,
@@ -80,7 +90,7 @@ export async function extractCandidates(
     const t = (duration * (i + 0.5)) / count;
     await seekTo(video, t);
     const c = await captureFrame(video, detector);
-    if (c) out.push(c);
+    if (c && !c.lowConfidence) out.push(c);
     onProgress?.(Math.round(((i + 1) / count) * 100));
   }
   return out;
