@@ -589,7 +589,9 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
   await page.click('button:has-text("Back to Moves")', { force: true });
 
   // ── Longer session: a 6-checkpoint move runs end to end (Pose X of 6) ──
-  await buildUploadedMove(page, DANCE, 6, "Six Move");
+  // Built from the waist-up (legless) clip so it never auto-passes — lets us
+  // step through all 6 deterministically with Skip and read every label.
+  await buildUploadedMove(page, DANCE_WAISTUP, 6, "Six Move");
   await page.click("text=Six Move");
   await page.click('button:has-text("Practice this move")');
   if (
@@ -599,44 +601,20 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
       .catch(() => false)
   )
     await page.click("text=Skip for now");
-  check(
-    "6-checkpoint move shows 'Pose 1 of 6' (count generalizes beyond 3)",
-    await page
-      .waitForSelector("text=Pose 1 of 6", { timeout: 15000 })
+  // Legless checkpoints never auto-pass → step through all 6 with Skip and
+  // confirm each "Pose i of 6" label appears in order.
+  let countsOk = true;
+  for (let i = 1; i <= 6; i++) {
+    const ok = await page
+      .waitForSelector(`text=Pose ${i} of 6`, { timeout: 15000 })
       .then(() => true)
-      .catch(() => false)
-  );
-  // The warrior webcam matches the warrior checkpoints, so it auto-passes each
-  // pose (~hold). Let it walk at its own pace — poll fast to catch every
-  // "Pose X of 6" — and only nudge with Skip if it stalls on one pose.
-  let maxPose = 0;
-  let lastPose = 0;
-  let lastChange = Date.now();
-  const start = Date.now();
-  while (
-    !(await page.isVisible("text=Overall score")) &&
-    Date.now() - start < 150000
-  ) {
-    const m = (await page.locator("main").innerText()).match(/Pose (\d) of 6/);
-    if (m) {
-      const pnum = parseInt(m[1], 10);
-      maxPose = Math.max(maxPose, pnum);
-      if (pnum !== lastPose) {
-        lastPose = pnum;
-        lastChange = Date.now();
-      }
-    }
-    if (Date.now() - lastChange > 4000) {
-      const skip = page.locator('button:has-text("Skip / Next")');
-      if ((await skip.count()) && (await skip.isVisible())) {
-        await skip.click({ force: true }).catch(() => {});
-        lastChange = Date.now();
-      }
-    }
-    await page.waitForTimeout(200);
+      .catch(() => false);
+    countsOk = countsOk && ok;
+    await page.click('button:has-text("Skip / Next")', { force: true });
+    await page.waitForTimeout(350);
   }
+  check("6-checkpoint move: 'Pose X of 6' correct for all 6 (count generalizes beyond 3)", countsOk);
   await page.waitForSelector("text=Overall score");
-  check(`6-checkpoint move walked through all 6 (max 'Pose X of 6' = ${maxPose})`, maxPose === 6);
   const sixRows = await page.locator("text=/^\\d+\\.\\s/").count();
   check(`6-checkpoint move reaches RESULT with 6 breakdown rows (${sixRows})`, sixRows === 6);
   await page.click('button:has-text("Back to Moves")', { force: true });
@@ -808,9 +786,88 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
     await fb.close();
   }
 
+  // ── /author capture guidance enforces the checklist's quality bar ──
+  async function openAuthor(y4mFile) {
+    const ab = await chromium.launch({
+      args: [
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        `--use-file-for-fake-video-capture=${y4mFile}`,
+      ],
+    });
+    const ap = await (
+      await ab.newContext({ permissions: ["camera"], reducedMotion: "reduce" })
+    ).newPage();
+    await ap.goto("http://localhost:3000/author");
+    await ap.waitForFunction(
+      () => {
+        const t = document.body.innerText;
+        return !t.includes("Loading model…") && !t.includes("Error:");
+      },
+      null,
+      { timeout: 120000 }
+    );
+    await ap.waitForTimeout(2500); // let a few frames run
+    return { ab, ap };
+  }
+  const promptOpacity = (pg) =>
+    pg
+      .getByTestId("fullbody-prompt")
+      .evaluate((el) => getComputedStyle(el).opacity)
+      .catch(() => "?");
+
+  // Full-body webcam: no prompt; capture succeeds, leg-driven, with thumbnail.
+  {
+    const { ab, ap } = await openAuthor(Y4M);
+    check(
+      "author: full body → no step-back prompt",
+      (await promptOpacity(ap)) === "0"
+    );
+    await ap.click('button:has-text("Add Checkpoint")');
+    await ap.waitForTimeout(500);
+    check(
+      "author: full-body capture succeeds (1 checkpoint)",
+      (await ap.locator('input[value^="Pose"]').count()) === 1
+    );
+    check(
+      "author: checkpoint flagged leg-driven",
+      await ap.isVisible("text=✓ leg-driven")
+    );
+    check(
+      "author: checkpoint has a skeleton thumbnail",
+      (await ap.locator("img[alt^='Pose']").count()) === 1
+    );
+    // Capturing the same pose again warns about similarity.
+    await ap.click('button:has-text("Add Checkpoint")');
+    await ap.waitForTimeout(500);
+    check(
+      "author: near-identical second pose warns 'very similar'",
+      await ap.isVisible("text=very similar to the previous pose")
+    );
+    await ap.screenshot({ path: "shot_author.png" });
+    await ab.close();
+  }
+
+  // Upper-body webcam: prompt shown; capture refused (legs not in frame).
+  {
+    const { ab, ap } = await openAuthor(WEBCAM_UPPER);
+    check(
+      "author: legs out of frame → step-back prompt visible",
+      (await promptOpacity(ap)) === "1"
+    );
+    await ap.click('button:has-text("Add Checkpoint")');
+    await ap.waitForTimeout(400);
+    check(
+      "author: capture refused when legs aren't in frame",
+      (await ap.locator('input[value^="Pose"]').count()) === 0 &&
+        (await ap.isVisible("text=Legs aren’t fully in frame"))
+    );
+    await ab.close();
+  }
+
   await browser.close();
   console.log(
-    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png, shot_camera_denied.png"
+    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png, shot_camera_denied.png, shot_author.png"
   );
   console.log(failures === 0 ? "\nALL E2E CHECKS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);
