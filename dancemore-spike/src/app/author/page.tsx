@@ -342,6 +342,7 @@ export default function AuthorPage() {
         </button>
         <button
           onClick={toggleTimer}
+          data-testid="timer-btn"
           style={
             countdown !== null
               ? { ...btn, background: "#7f1d1d", border: "1px solid #991b1b" }

@@ -28,10 +28,14 @@ import { WarmupChecklist } from "@/components/WarmupChecklist";
 import { UploadMove } from "@/components/UploadMove";
 
 // ── Demo-feel dials ─────────────────────────────────────────────────────────
-// Pass when the live score holds >= PASS_THRESHOLD continuously for HOLD_MS.
+// Pass-through (not freeze-and-hold): a checkpoint passes when the score stays
+// at/above PASS_THRESHOLD across a short window as the user MOVES THROUGH the
+// pose. Pass detection uses a lighter smoothing than the display so a quick hit
+// while dancing still registers; the window rejects single-frame noise.
 const PASS_THRESHOLD = 70;
-const HOLD_MS = 800;
-const SMOOTH_WINDOW = 10; // frames of score smoothing, as in the spike
+const PASS_WINDOW_MS = 180; // ~a few frames at/above threshold = a pass-through hit
+const PASS_SMOOTH_WINDOW = 3; // light smoothing for pass detection (responsive)
+const SMOOTH_WINDOW = 10; // frames of smoothing for the displayed number + best score
 const REST_THRESHOLD = 6; // suggest a rest day at this many consecutive days
 const COMPLETE_THRESHOLD = 80; // a move is "completed" once its best score crosses this
 const WARMUP_KEY = "dancemore_warmedUpDate";
@@ -688,13 +692,14 @@ function Practice({
 
   const peaksRef = useRef<number[]>(move.checkpoints.map(() => 0));
   const scoreBufRef = useRef<number[]>([]);
-  const holdStartRef = useRef<number | null>(null);
+  // When the pass-through window (score continuously >= threshold) started.
+  const passStartRef = useRef<number | null>(null);
   const advancingRef = useRef(false);
 
   // Reset per-checkpoint live state whenever we move to a new checkpoint.
   useEffect(() => {
     advancingRef.current = false;
-    holdStartRef.current = null;
+    passStartRef.current = null;
     scoreBufRef.current = [];
     if (holdBarRef.current) holdBarRef.current.style.width = "0%";
     if (bestRef.current) bestRef.current.textContent = "Best: 0";
@@ -729,20 +734,27 @@ function Practice({
           el.style.color = "#fbbf24";
           el.style.fontSize = "0.95rem";
         }
-        holdStartRef.current = null;
+        passStartRef.current = null;
         if (holdBarRef.current) holdBarRef.current.style.width = "0%";
         return;
       }
 
       const raw = scorePose(checkpoint.angles, angles);
 
-      // Smooth the score over a short window (mirrors the spike).
+      // Two smoothings from one raw-score buffer:
+      //  • display/best: SMOOTH_WINDOW frames (steady number, unchanged).
+      //  • pass detection: the last PASS_SMOOTH_WINDOW frames (responsive, so a
+      //    quick hit while moving isn't damped below threshold).
       let smoothed: number | null = null;
+      let passScore: number | null = null;
       if (raw !== null) {
         const buf = scoreBufRef.current;
         buf.push(raw);
         if (buf.length > SMOOTH_WINDOW) buf.shift();
         smoothed = Math.round(buf.reduce((s, v) => s + v, 0) / buf.length);
+        const k = Math.min(PASS_SMOOTH_WINDOW, buf.length);
+        const recent = buf.slice(buf.length - k);
+        passScore = Math.round(recent.reduce((s, v) => s + v, 0) / k);
       }
 
       if (smoothed === null) {
@@ -752,7 +764,7 @@ function Practice({
           el.style.color = "#aaa";
           el.style.fontSize = "1.1rem";
         }
-        holdStartRef.current = null;
+        passStartRef.current = null;
         if (holdBarRef.current) holdBarRef.current.style.width = "0%";
         return;
       }
@@ -763,29 +775,36 @@ function Practice({
         el.style.color = scoreColor(smoothed);
       }
 
-      // Track the peak (best) score reached for this checkpoint.
+      // Track the peak (best) score reached for this checkpoint (unchanged —
+      // feeds the result breakdown and COMPLETE_THRESHOLD mastery logic).
       if (smoothed > peaksRef.current[index]) {
         peaksRef.current[index] = smoothed;
         if (bestRef.current) bestRef.current.textContent = `Best: ${smoothed}`;
       }
 
-      // Hold-to-pass: lock the checkpoint once the score stays at/above the
-      // threshold continuously for HOLD_MS. A pass also requires the legs to
-      // participate (≥2 shared lower-body joints), so an upper-body-only match
-      // can never register as a pass.
+      // Pass-through: the checkpoint passes when the (lightly-smoothed) score
+      // stays at/above the threshold across a short window — long enough to be
+      // a real hit as you move through the pose, short enough that you don't
+      // have to stop. A single-frame noise spike can't sustain the window. A
+      // pass still requires the legs to participate (≥2 shared lower-body
+      // joints), so an upper-body-only match can never register as a pass.
       const now = performance.now();
-      if (smoothed >= PASS_THRESHOLD && passHasLegs(checkpoint.angles, angles)) {
-        if (holdStartRef.current === null) holdStartRef.current = now;
-        const held = now - holdStartRef.current;
+      if (
+        passScore !== null &&
+        passScore >= PASS_THRESHOLD &&
+        passHasLegs(checkpoint.angles, angles)
+      ) {
+        if (passStartRef.current === null) passStartRef.current = now;
+        const inWindow = now - passStartRef.current;
         if (holdBarRef.current) {
           holdBarRef.current.style.width = `${Math.min(
             100,
-            (held / HOLD_MS) * 100
+            (inWindow / PASS_WINDOW_MS) * 100
           )}%`;
         }
-        if (held >= HOLD_MS) advance();
+        if (inWindow >= PASS_WINDOW_MS) advance();
       } else {
-        holdStartRef.current = null;
+        passStartRef.current = null;
         if (holdBarRef.current) holdBarRef.current.style.width = "0%";
       }
     }
@@ -867,7 +886,7 @@ function Practice({
           </div>
         </div>
 
-        {/* Hold-to-pass progress, anchored to the bottom of the camera. */}
+        {/* Pass-through progress, anchored to the bottom of the camera. */}
         <div
           style={{
             position: "absolute",

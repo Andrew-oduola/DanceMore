@@ -17,6 +17,8 @@ const LOWCONF = fx("lowconf.mp4");
 const WEBCAM_UPPER = fx("webcam_upper.y4m"); // head/shoulders only — no legs
 const WEBCAM_LEGSOUT = fx("webcam_legsout.y4m"); // full → legs-out → full
 const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints, no legs
+const WEBCAM_PASSTHROUGH = fx("webcam_passthrough.y4m"); // matches only ~0.5s at a time
+const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-window)
 
 (async () => {
   const browser = await chromium.launch({
@@ -851,43 +853,36 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
       await ap.isVisible("text=very similar to the previous pose")
     );
 
-    // 5s self-timer. Use raw DOM clicks on the timer button (its setState
-    // re-render otherwise triggers Playwright's flaky post-click nav wait).
+    // 5s self-timer. Click the timer button by its stable testid (it's a
+    // toggle: arms when idle, cancels when running) with a raw DOM click so a
+    // single synchronous toggleTimer() runs — no dependence on the button's
+    // (re-render-lagged) label, and no retry that could re-arm.
     const cpCount = () => ap.locator('input[value^="Pose"]').count();
-    const armTimer = () =>
-      ap.locator('button:has-text("5s timer")').first().evaluate((el) => el.click());
+    const clickTimer = () =>
+      ap.getByTestId("timer-btn").evaluate((el) => el.click());
 
-    // Cancel mid-countdown captures nothing.
+    // Cancel mid-countdown captures nothing: arm, then immediately toggle off
+    // (one click clears the interval synchronously, well before the ≥5s fire).
     const beforeCancel = await cpCount();
-    await armTimer();
+    await clickTimer(); // arm
     check(
       "author timer: countdown overlay shows after arming",
       await ap.getByTestId("timer-countdown").isVisible()
     );
-    await ap.waitForTimeout(1500);
-    await ap
-      .locator('button:has-text("Cancel")')
-      .first()
-      .evaluate((el) => el.click()); // cancel before 0
-    // The overlay-removal re-render can lag under inference load — wait for it.
-    const overlayGone = await ap
-      .waitForFunction(
-        () => !document.querySelector('[data-testid="timer-countdown"]'),
-        null,
-        { timeout: 8000 }
-      )
-      .then(() => true)
-      .catch(() => false);
+    await clickTimer(); // cancel (single, synchronous)
+    // Wait past a full fresh 5s window: a cancelled timer captures nothing.
+    await ap.waitForTimeout(7000);
     check(
       "author timer: cancel mid-countdown captures nothing + overlay gone",
-      overlayGone && (await cpCount()) === beforeCancel
+      !(await ap.getByTestId("timer-countdown").isVisible()) &&
+        (await cpCount()) === beforeCancel
     );
 
     // Re-arm and let it run to 0 → captures via the same path. The countdown
     // can run slow under the CPU-backend inference load, so poll for the
     // capture rather than assuming a fixed 5s.
     const beforeTimed = await cpCount();
-    await armTimer();
+    await clickTimer();
     const timedCaptured = await ap
       .waitForFunction(
         (n) =>
@@ -918,7 +913,7 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
     );
     // The 5s timer at 0 applies the SAME refusal — saves nothing. Wait for the
     // refusal note to (re)appear, allowing for slow countdown under load.
-    await ap.locator('button:has-text("5s timer")').first().evaluate((el) => el.click());
+    await ap.getByTestId("timer-btn").evaluate((el) => el.click());
     const refusedAtZero = await ap
       .waitForFunction(
         () =>
@@ -935,6 +930,100 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
       refusedAtZero
     );
     await ab.close();
+  }
+
+  // ── Pass-through scoring: score while MOVING (no freeze-and-hold) ──
+  // A warrior move practiced against a webcam where the matching pose appears
+  // only briefly (well under the old 800ms hold). Brief match → passes;
+  // sub-window blip → never passes.
+  async function warriorPracticeWith(y4mFile) {
+    const wb = await chromium.launch({
+      args: [
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        `--use-file-for-fake-video-capture=${y4mFile}`,
+      ],
+    });
+    const wp = await (
+      await wb.newContext({ permissions: ["camera"], reducedMotion: "reduce" })
+    ).newPage();
+    await wp.goto("http://localhost:3000/");
+    await wp.fill('input[placeholder="Username"]', "demo");
+    await wp.fill('input[placeholder="Password"]', "demo1234");
+    await wp.click('button:has-text("Log in")');
+    await wp.waitForSelector("text=Pick a move to practice");
+    // Build a 2-checkpoint full-body warrior move from DANCE.
+    await wp.click("text=⬆ Upload a dance");
+    await wp.waitForSelector("text=Choose a video file");
+    await wp.setInputFiles('input[type="file"]', DANCE);
+    await wp.waitForSelector("text=Capture this frame", { timeout: 180000 });
+    while ((await wp.locator('button:has-text("✕ Remove")').count()) > 0)
+      await wp.locator('button:has-text("✕ Remove")').first().click();
+    for (let i = 0; i < 2; i++) {
+      const before = await wp
+        .locator('input[aria-label="Checkpoint name"]')
+        .count();
+      await wp.locator("video").evaluate(
+        (v, f) =>
+          new Promise((res) => {
+            v.pause();
+            v.addEventListener("seeked", () => res(), { once: true });
+            v.currentTime = v.duration * f;
+          }),
+        (i + 0.5) / 2
+      );
+      await wp.click('button:has-text("Capture this frame")');
+      await wp.waitForFunction(
+        (k) =>
+          document.querySelectorAll('input[aria-label="Checkpoint name"]')
+            .length === k + 1,
+        before,
+        { timeout: 30000 }
+      );
+    }
+    await wp.fill('input[placeholder^="Move name"]', "Flow Move");
+    await wp.click('button:has-text("Save move")');
+    await wp.waitForSelector('button.moveCard:has-text("Flow Move")');
+    await wp.click("text=Flow Move");
+    await wp.click('button:has-text("Practice this move")');
+    if (
+      await wp
+        .waitForSelector("text=Warm up first", { timeout: 2500 })
+        .then(() => true)
+        .catch(() => false)
+    )
+      await wp.click("text=Skip for now");
+    await wp.waitForSelector("text=Pose 1 of 2");
+    return { wb, wp };
+  }
+
+  {
+    const { wb, wp } = await warriorPracticeWith(WEBCAM_PASSTHROUGH);
+    // The pose is in frame only ~0.5s at a time — old freeze-and-hold (800ms)
+    // could never pass it; pass-through must.
+    const advanced = await wp
+      .waitForFunction(
+        () => !document.body.innerText.includes("Pose 1 of 2"),
+        null,
+        { timeout: 60000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    check("pass-through: brief match while MOVING passes a checkpoint (no freeze)", advanced);
+    await wb.close();
+  }
+
+  {
+    const { wb, wp } = await warriorPracticeWith(WEBCAM_BLIP);
+    // The pose flashes for only ~0.1s (below the pass window) — a noise-spike
+    // analogue. It must never pass.
+    await wp.waitForTimeout(9000);
+    check(
+      "pass-through: sub-window blip (single-frame spike) does NOT false-pass",
+      (await wp.isVisible("text=Pose 1 of 2")) &&
+        !(await wp.isVisible("text=Overall score"))
+    );
+    await wb.close();
   }
 
   await browser.close();
