@@ -22,7 +22,7 @@ const JOINTS: [string, string, string][] = [
   ["right_hip", "right_knee", "right_ankle"], // right knee
 ];
 
-const MIN_CONF = 0.3;
+export const MIN_CONF = 0.3;
 
 // Returns a map of jointIndex -> angle, skipping low-confidence joints
 export function angleVector(keypoints: KP[]): Record<number, number> {

@@ -10,6 +10,7 @@ import {
 import Link from "next/link";
 import { scorePose } from "@/lib/pose";
 import { loadMoves, validYoutubeId, type Move } from "@/lib/moves";
+import { hasFullBody, passHasLegs } from "@/lib/bodyGate";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { CameraStage } from "@/components/CameraStage";
 import { scoreColor } from "@/lib/scoreColor";
@@ -715,7 +716,24 @@ function Practice({
   }
 
   const { videoRef, canvasRef, ready, error, errorKind, retry, ghostRef } =
-    usePoseDetection((_kp, angles) => {
+    usePoseDetection((kp, angles) => {
+      const el = scoreRef.current;
+
+      // Full-body presence gate: never score or accrue hold-time on a partial
+      // body. Until the legs are in frame we pause evaluation and prompt the
+      // user; scoring resumes automatically once the full body returns.
+      if (!hasFullBody(kp)) {
+        if (el) {
+          el.textContent =
+            "Step back so we can see your whole body — legs included.";
+          el.style.color = "#fbbf24";
+          el.style.fontSize = "0.95rem";
+        }
+        holdStartRef.current = null;
+        if (holdBarRef.current) holdBarRef.current.style.width = "0%";
+        return;
+      }
+
       const raw = scorePose(checkpoint.angles, angles);
 
       // Smooth the score over a short window (mirrors the spike).
@@ -727,7 +745,6 @@ function Practice({
         smoothed = Math.round(buf.reduce((s, v) => s + v, 0) / buf.length);
       }
 
-      const el = scoreRef.current;
       if (smoothed === null) {
         // Fewer than 4 shared joints visible — can't judge.
         if (el) {
@@ -753,9 +770,11 @@ function Practice({
       }
 
       // Hold-to-pass: lock the checkpoint once the score stays at/above the
-      // threshold continuously for HOLD_MS.
+      // threshold continuously for HOLD_MS. A pass also requires the legs to
+      // participate (≥2 shared lower-body joints), so an upper-body-only match
+      // can never register as a pass.
       const now = performance.now();
-      if (smoothed >= PASS_THRESHOLD) {
+      if (smoothed >= PASS_THRESHOLD && passHasLegs(checkpoint.angles, angles)) {
         if (holdStartRef.current === null) holdStartRef.current = now;
         const held = now - holdStartRef.current;
         if (holdBarRef.current) {
@@ -831,6 +850,7 @@ function Practice({
         >
           <div
             ref={scoreRef}
+            data-testid="live-score"
             style={{
               fontWeight: 800,
               fontSize: "1.1rem",

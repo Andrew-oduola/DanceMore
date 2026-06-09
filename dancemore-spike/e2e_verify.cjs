@@ -10,9 +10,13 @@
 const path = require("path");
 const { chromium } = require("playwright");
 
-const Y4M = path.resolve(__dirname, "test-fixtures", "webcam.y4m");
-const DANCE = path.resolve(__dirname, "test-fixtures", "dance.mp4");
-const LOWCONF = path.resolve(__dirname, "test-fixtures", "lowconf.mp4");
+const fx = (f) => path.resolve(__dirname, "test-fixtures", f);
+const Y4M = fx("webcam.y4m");
+const DANCE = fx("dance.mp4");
+const LOWCONF = fx("lowconf.mp4");
+const WEBCAM_UPPER = fx("webcam_upper.y4m"); // head/shoulders only — no legs
+const WEBCAM_LEGSOUT = fx("webcam_legsout.y4m"); // full → legs-out → full
+const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints, no legs
 
 (async () => {
   const browser = await chromium.launch({
@@ -50,6 +54,57 @@ const LOWCONF = path.resolve(__dirname, "test-fixtures", "lowconf.mp4");
     console.log(`[${cond ? "OK " : "FAIL"}] ${name}`);
   };
   const gumCalls = () => page.evaluate(() => window.__gumCalls);
+  // Read the live-score chip reliably (it's updated imperatively each frame).
+  const liveScore = (pg) =>
+    pg
+      .getByTestId("live-score")
+      .innerText()
+      .then((t) => t.trim())
+      .catch(() => "");
+  // A move built by uploading `clip` then capturing `n` frames via the scrubber.
+  async function buildUploadedMove(pg, clip, n, name) {
+    await pg.click('button:has-text("Library")');
+    await pg.waitForSelector("text=Pick a move to practice");
+    await pg.click("text=⬆ Upload a dance");
+    await pg.waitForSelector("text=Choose a video file");
+    await pg.setInputFiles('input[type="file"]', clip);
+    await pg.waitForSelector("text=Capture this frame", { timeout: 180000 });
+    // Drop any auto-sampled candidates so the move has EXACTLY n checkpoints
+    // (high-confidence clips auto-keep up to 10, which would skew the count).
+    while ((await pg.locator('button:has-text("✕ Remove")').count()) > 0)
+      await pg.locator('button:has-text("✕ Remove")').first().click();
+    for (let i = 0; i < n; i++) {
+      const before = await pg
+        .locator('input[aria-label="Checkpoint name"]')
+        .count();
+      await pg.locator("video").evaluate(
+        (v, frac) =>
+          new Promise((res) => {
+            v.pause();
+            v.addEventListener("seeked", () => res(), { once: true });
+            v.currentTime = v.duration * frac;
+          }),
+        (i + 0.5) / n
+      );
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await pg.click('button:has-text("Capture this frame")');
+        const ok = await pg
+          .waitForFunction(
+            (k) =>
+              document.querySelectorAll('input[aria-label="Checkpoint name"]')
+                .length >= k + 1,
+            before,
+            { timeout: 30000 }
+          )
+          .then(() => true)
+          .catch(() => false);
+        if (ok) break;
+      }
+    }
+    await pg.fill('input[placeholder^="Move name"]', name);
+    await pg.click('button:has-text("Save move")');
+    await pg.waitForSelector(`button.moveCard:has-text("${name}")`);
+  }
   const liveTracks = () =>
     page.evaluate(
       () =>
@@ -472,6 +527,120 @@ const LOWCONF = path.resolve(__dirname, "test-fixtures", "lowconf.mp4");
   page.off("pageerror", onErr);
   await page.click('button:has-text("Back to Moves")', { force: true });
 
+  // ── Full body present, WRONG pose: scores but must not falsely pass ──
+  // Webcam is the full-body warrior; Side Step Reach checkpoints are neutral/
+  // reach poses, so it should score (legs in frame → gate open) but never pass.
+  await page.click("text=Side Step Reach");
+  await page.click('button:has-text("Practice this move")'); // youtubeId → WATCH
+  if (
+    await page
+      .waitForSelector("text=Warm up first", { timeout: 2000 })
+      .then(() => true)
+      .catch(() => false)
+  )
+    await page.click("text=Skip for now");
+  await page.waitForSelector("text=Pose 1 of 3");
+  await page.waitForTimeout(1500);
+  const wrongScore = await liveScore(page);
+  check(
+    `full body + wrong pose: gate open, scoring runs ("${wrongScore}", not the step-back prompt)`,
+    !wrongScore.includes("Step back")
+  );
+  await page.waitForTimeout(3500);
+  check(
+    "full body + wrong pose does NOT falsely pass (still on Pose 1)",
+    await page.isVisible("text=Pose 1 of 3")
+  );
+  await page.click('button:has-text("Back to Moves")', { force: true });
+
+  // ── Pass-validity: a legless (waist-up) checkpoint must never pass, even
+  // with a full-body webcam scoring it high on the upper joints ──
+  await buildUploadedMove(page, DANCE_WAISTUP, 2, "Waistup Move");
+  await page.click("text=Waistup Move");
+  await page.click('button:has-text("Practice this move")');
+  if (
+    await page
+      .waitForSelector("text=Warm up first", { timeout: 2000 })
+      .then(() => true)
+      .catch(() => false)
+  )
+    await page.click("text=Skip for now");
+  await page.waitForSelector("text=Pose 1 of 2");
+  // Sample the score for a few seconds; the upper body matches so it can read
+  // high, but with no lower-body joints shared the pass must never fire.
+  let maxSeen = -1;
+  for (let i = 0; i < 16; i++) {
+    await page.waitForTimeout(280);
+    const t = await liveScore(page);
+    if (/^\d{1,3}$/.test(t)) maxSeen = Math.max(maxSeen, parseInt(t, 10));
+    if (await page.isVisible("text=Overall score")) break;
+  }
+  check(
+    `legless checkpoint does NOT auto-pass with full body (peak score seen=${maxSeen}, still pre-result)`,
+    !(await page.isVisible("text=Overall score"))
+  );
+  // Skip remains available so the user is never stuck.
+  for (let i = 0; i < 2; i++) {
+    await page.click('button:has-text("Skip / Next")', { force: true });
+    await page.waitForTimeout(400);
+  }
+  await page.waitForSelector("text=Overall score");
+  check("legless move still reaches RESULT via Skip", true);
+  await page.click('button:has-text("Back to Moves")', { force: true });
+
+  // ── Longer session: a 6-checkpoint move runs end to end (Pose X of 6) ──
+  await buildUploadedMove(page, DANCE, 6, "Six Move");
+  await page.click("text=Six Move");
+  await page.click('button:has-text("Practice this move")');
+  if (
+    await page
+      .waitForSelector("text=Warm up first", { timeout: 2000 })
+      .then(() => true)
+      .catch(() => false)
+  )
+    await page.click("text=Skip for now");
+  check(
+    "6-checkpoint move shows 'Pose 1 of 6' (count generalizes beyond 3)",
+    await page
+      .waitForSelector("text=Pose 1 of 6", { timeout: 15000 })
+      .then(() => true)
+      .catch(() => false)
+  );
+  // The warrior webcam matches the warrior checkpoints, so it auto-passes each
+  // pose (~hold). Let it walk at its own pace — poll fast to catch every
+  // "Pose X of 6" — and only nudge with Skip if it stalls on one pose.
+  let maxPose = 0;
+  let lastPose = 0;
+  let lastChange = Date.now();
+  const start = Date.now();
+  while (
+    !(await page.isVisible("text=Overall score")) &&
+    Date.now() - start < 150000
+  ) {
+    const m = (await page.locator("main").innerText()).match(/Pose (\d) of 6/);
+    if (m) {
+      const pnum = parseInt(m[1], 10);
+      maxPose = Math.max(maxPose, pnum);
+      if (pnum !== lastPose) {
+        lastPose = pnum;
+        lastChange = Date.now();
+      }
+    }
+    if (Date.now() - lastChange > 4000) {
+      const skip = page.locator('button:has-text("Skip / Next")');
+      if ((await skip.count()) && (await skip.isVisible())) {
+        await skip.click({ force: true }).catch(() => {});
+        lastChange = Date.now();
+      }
+    }
+    await page.waitForTimeout(200);
+  }
+  await page.waitForSelector("text=Overall score");
+  check(`6-checkpoint move walked through all 6 (max 'Pose X of 6' = ${maxPose})`, maxPose === 6);
+  const sixRows = await page.locator("text=/^\\d+\\.\\s/").count();
+  check(`6-checkpoint move reaches RESULT with 6 breakdown rows (${sixRows})`, sixRows === 6);
+  await page.click('button:has-text("Back to Moves")', { force: true });
+
   // ── Camera-deny recovery ──
   // Real browsers throw NotAllowedError when the user denies; headless
   // Chromium can't reproduce that exact name (and a fake-device-only browser
@@ -557,6 +726,87 @@ const LOWCONF = path.resolve(__dirname, "test-fixtures", "lowconf.mp4");
     .catch(() => false);
   check("Try again → feed + detection resume normally", feedBack);
   await deniedCtx.close();
+
+  // ── Full-body presence gate (needs a different fake-camera file, so its own
+  // browser). A helper logs in as demo and enters practice on a starter move.
+  async function enterPractice(args) {
+    const fb = await chromium.launch({
+      args: [
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        ...args,
+      ],
+    });
+    const pg = await (
+      await fb.newContext({ permissions: ["camera"], reducedMotion: "reduce" })
+    ).newPage();
+    await pg.goto("http://localhost:3000/");
+    await pg.fill('input[placeholder="Username"]', "demo");
+    await pg.fill('input[placeholder="Password"]', "demo1234");
+    await pg.click('button:has-text("Log in")');
+    await pg.waitForSelector("text=Pick a move to practice");
+    await pg.click("text=Side Step Reach");
+    await pg.click('button:has-text("Practice this move")');
+    if (
+      await pg
+        .waitForSelector("text=Warm up first", { timeout: 3000 })
+        .then(() => true)
+        .catch(() => false)
+    )
+      await pg.click("text=Skip for now");
+    await pg.waitForSelector("text=Pose 1 of 3");
+    return { fb, pg };
+  }
+
+  // Start gate: upper-body-only webcam → never scores, prompt shown.
+  {
+    const { fb, pg } = await enterPractice([
+      `--use-file-for-fake-video-capture=${WEBCAM_UPPER}`,
+    ]);
+    const states = new Set();
+    let sawNumber = false;
+    for (let i = 0; i < 16; i++) {
+      await pg.waitForTimeout(280);
+      const t = await liveScore(pg);
+      if (t) states.add(t.slice(0, 10));
+      if (/^\d{1,3}$/.test(t)) sawNumber = true;
+    }
+    await pg.screenshot({ path: "shot_fullbody_gate.png" });
+    check(
+      "upper-body-only: scoring never starts (step-back prompt, no number)",
+      [...states].some((s) => s.includes("Step back")) && !sawNumber
+    );
+    check(
+      "upper-body-only: no auto-advance (still Pose 1 of 3)",
+      await pg.isVisible("text=Pose 1 of 3")
+    );
+    await fb.close();
+  }
+
+  // During session: legs leave then return → pause then resume.
+  {
+    const { fb, pg } = await enterPractice([
+      `--use-file-for-fake-video-capture=${WEBCAM_LEGSOUT}`,
+    ]);
+    let sawPrompt = false;
+    let sawScoreState = false; // a number OR "Get into frame" = gate open
+    for (let i = 0; i < 40; i++) {
+      await pg.waitForTimeout(250);
+      const t = await liveScore(pg);
+      if (t.includes("Step back")) sawPrompt = true;
+      else if (/^\d{1,3}$/.test(t) || t.includes("Get into frame"))
+        sawScoreState = true;
+    }
+    check(
+      "legs leave mid-session → pause (step-back prompt appears)",
+      sawPrompt
+    );
+    check(
+      "legs return → resume (gate re-opens to a scoring state)",
+      sawScoreState
+    );
+    await fb.close();
+  }
 
   await browser.close();
   console.log(
