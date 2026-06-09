@@ -610,7 +610,13 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
       .then(() => true)
       .catch(() => false);
     countsOk = countsOk && ok;
-    await page.click('button:has-text("Skip / Next")', { force: true });
+    // Raw DOM click — avoids Playwright's flaky post-click "wait for scheduled
+    // navigations" hang when this SPA button re-renders the view.
+    await page
+      .locator('button:has-text("Skip / Next")')
+      .first()
+      .evaluate((el) => el.click())
+      .catch(() => {});
     await page.waitForTimeout(350);
   }
   check("6-checkpoint move: 'Pose X of 6' correct for all 6 (count generalizes beyond 3)", countsOk);
@@ -844,6 +850,54 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
       "author: near-identical second pose warns 'very similar'",
       await ap.isVisible("text=very similar to the previous pose")
     );
+
+    // 5s self-timer. Use raw DOM clicks on the timer button (its setState
+    // re-render otherwise triggers Playwright's flaky post-click nav wait).
+    const cpCount = () => ap.locator('input[value^="Pose"]').count();
+    const armTimer = () =>
+      ap.locator('button:has-text("5s timer")').first().evaluate((el) => el.click());
+
+    // Cancel mid-countdown captures nothing.
+    const beforeCancel = await cpCount();
+    await armTimer();
+    check(
+      "author timer: countdown overlay shows after arming",
+      await ap.getByTestId("timer-countdown").isVisible()
+    );
+    await ap.waitForTimeout(1500);
+    await ap
+      .locator('button:has-text("Cancel")')
+      .first()
+      .evaluate((el) => el.click()); // cancel before 0
+    // The overlay-removal re-render can lag under inference load — wait for it.
+    const overlayGone = await ap
+      .waitForFunction(
+        () => !document.querySelector('[data-testid="timer-countdown"]'),
+        null,
+        { timeout: 8000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    check(
+      "author timer: cancel mid-countdown captures nothing + overlay gone",
+      overlayGone && (await cpCount()) === beforeCancel
+    );
+
+    // Re-arm and let it run to 0 → captures via the same path. The countdown
+    // can run slow under the CPU-backend inference load, so poll for the
+    // capture rather than assuming a fixed 5s.
+    const beforeTimed = await cpCount();
+    await armTimer();
+    const timedCaptured = await ap
+      .waitForFunction(
+        (n) =>
+          document.querySelectorAll('input[value^="Pose"]').length === n + 1,
+        beforeTimed,
+        { timeout: 30000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    check("author timer: reaches 0 and captures a checkpoint (same path)", timedCaptured);
     await ap.screenshot({ path: "shot_author.png" });
     await ab.close();
   }
@@ -861,6 +915,24 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
       "author: capture refused when legs aren't in frame",
       (await ap.locator('input[value^="Pose"]').count()) === 0 &&
         (await ap.isVisible("text=Legs aren’t fully in frame"))
+    );
+    // The 5s timer at 0 applies the SAME refusal — saves nothing. Wait for the
+    // refusal note to (re)appear, allowing for slow countdown under load.
+    await ap.locator('button:has-text("5s timer")').first().evaluate((el) => el.click());
+    const refusedAtZero = await ap
+      .waitForFunction(
+        () =>
+          document.body.innerText.includes("Legs aren’t fully in frame") &&
+          document.querySelectorAll('input[value^="Pose"]').length === 0 &&
+          !document.querySelector('[data-testid="timer-countdown"]'),
+        null,
+        { timeout: 30000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    check(
+      "author timer: refuses at 0 when legs aren't in frame (nothing saved)",
+      refusedAtZero
     );
     await ab.close();
   }

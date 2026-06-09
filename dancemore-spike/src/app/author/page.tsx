@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
@@ -13,6 +13,7 @@ import { hasFullBody, passHasLegs } from "@/lib/bodyGate";
 // made of near-identical poses can be gamed by barely moving.
 const SIMILAR_THRESHOLD = 88;
 const THUMB_W = 200;
+const TIMER_SECONDS = 5;
 
 // UI-only augmentation: a thumbnail + quality flags that aren't exported.
 type Authored = Checkpoint & { thumb: string; legDriven: boolean };
@@ -34,6 +35,11 @@ export default function AuthorPage() {
   const fullBodyRef = useRef(false);
   const promptRef = useRef<HTMLDivElement>(null);
 
+  // Self-timer state: countdown is the seconds remaining (null = idle).
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioRef = useRef<AudioContext | null>(null);
+
   const { videoRef, canvasRef, ready, error, errorKind, retry } =
     usePoseDetection((kp, angles) => {
       anglesRef.current = angles;
@@ -43,6 +49,87 @@ export default function AuthorPage() {
       const p = promptRef.current;
       if (p) p.style.opacity = full ? "0" : "1";
     });
+
+  // A short Web Audio tone — used for the countdown beeps and the shutter, so
+  // you can time the pose by ear from across the room (no asset files).
+  function tone(freq: number, durationMs: number, type: OscillatorType = "sine") {
+    try {
+      const Ctx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = audioRef.current ?? (audioRef.current = new Ctx());
+      if (ctx.state === "suspended") void ctx.resume();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.3, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+      osc.start(now);
+      osc.stop(now + durationMs / 1000 + 0.02);
+    } catch {
+      // Audio is a nicety; never let it break capture.
+    }
+  }
+
+  function stopTimer() {
+    if (tickRef.current !== null) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    setCountdown(null);
+  }
+
+  // Arm the 5s self-timer, or cancel it if already running. At 0 it runs the
+  // EXACT same addCheckpoint() as the instant button — same frame grab, same
+  // full-body gate, badge, and distinctness check.
+  //
+  // Driven off a start timestamp (not a tick counter) so the countdown stays
+  // accurate to real elapsed time even when the pose-inference loop janks the
+  // main thread and delays the interval.
+  function toggleTimer() {
+    if (tickRef.current !== null) {
+      stopTimer(); // running → cancel, captures nothing
+      return;
+    }
+    // Baseline at arm time (this is a click handler, not render — the purity
+    // rule's render guard doesn't apply) so the countdown reflects true elapsed
+    // time even if the inference loop later starves the interval ticks.
+    // eslint-disable-next-line react-hooks/purity
+    const startedAt = performance.now();
+    let lastBeeped = TIMER_SECONDS + 1;
+    setCountdown(TIMER_SECONDS);
+    tone(880, 120); // arming blip (also unlocks AudioContext on the click)
+    tickRef.current = setInterval(() => {
+      const elapsed = (performance.now() - startedAt) / 1000;
+      const remaining = Math.ceil(TIMER_SECONDS - elapsed);
+      if (remaining > 0) {
+        setCountdown(remaining);
+        if (remaining <= 3 && remaining < lastBeeped) {
+          lastBeeped = remaining;
+          tone(880, 120); // one beep each on 3, 2, 1
+        }
+      } else {
+        stopTimer();
+        tone(1320, 260, "square"); // distinct shutter at 0
+        addCheckpoint(); // reuse the existing capture + validation path
+      }
+    }, 200);
+  }
+
+  // Clean up the interval and audio context on unmount.
+  useEffect(() => {
+    return () => {
+      if (tickRef.current !== null) clearInterval(tickRef.current);
+      void audioRef.current?.close();
+    };
+  }, []);
 
   function addCheckpoint() {
     const angles = anglesRef.current;
@@ -205,6 +292,33 @@ export default function AuthorPage() {
         >
           Step back so we can see your whole body — legs included.
         </div>
+
+        {/* Self-timer countdown — big enough to read from across the room. */}
+        {countdown !== null && (
+          <div
+            data-testid="timer-countdown"
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              pointerEvents: "none",
+            }}
+          >
+            <span
+              style={{
+                fontSize: "8rem",
+                fontWeight: 800,
+                color: "#fff",
+                lineHeight: 1,
+                textShadow: "0 4px 24px rgba(0,0,0,0.8)",
+              }}
+            >
+              {countdown}
+            </span>
+          </div>
+        )}
       </CameraStage>
 
       <input
@@ -225,6 +339,18 @@ export default function AuthorPage() {
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
         <button onClick={addCheckpoint} style={btn}>
           Add Checkpoint
+        </button>
+        <button
+          onClick={toggleTimer}
+          style={
+            countdown !== null
+              ? { ...btn, background: "#7f1d1d", border: "1px solid #991b1b" }
+              : btn
+          }
+        >
+          {countdown !== null
+            ? `Cancel (${countdown})`
+            : `Add checkpoint (${TIMER_SECONDS}s timer)`}
         </button>
         <button
           onClick={removeLast}
