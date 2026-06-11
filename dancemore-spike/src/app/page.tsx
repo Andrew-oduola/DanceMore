@@ -8,9 +8,9 @@ import {
   useSyncExternalStore,
 } from "react";
 import Link from "next/link";
-import { scorePose } from "@/lib/pose";
-import { loadMoves, validYoutubeId, type Move } from "@/lib/moves";
-import { hasFullBody, passHasLegs } from "@/lib/bodyGate";
+import { loadMoves, validYoutubeId, isSynced, type Move } from "@/lib/moves";
+import { scoreCheckpointFrame } from "@/lib/practiceScore";
+import { SyncedPractice } from "@/components/SyncedPractice";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { CameraStage } from "@/components/CameraStage";
 import { scoreColor } from "@/lib/scoreColor";
@@ -28,14 +28,8 @@ import { WarmupChecklist } from "@/components/WarmupChecklist";
 import { UploadMove } from "@/components/UploadMove";
 
 // ── Demo-feel dials ─────────────────────────────────────────────────────────
-// Pass-through (not freeze-and-hold): a checkpoint passes when the score stays
-// at/above PASS_THRESHOLD across a short window as the user MOVES THROUGH the
-// pose. Pass detection uses a lighter smoothing than the display so a quick hit
-// while dancing still registers; the window rejects single-frame noise.
-const PASS_THRESHOLD = 70;
-const PASS_WINDOW_MS = 180; // ~a few frames at/above threshold = a pass-through hit
-const PASS_SMOOTH_WINDOW = 3; // light smoothing for pass detection (responsive)
-const SMOOTH_WINDOW = 10; // frames of smoothing for the displayed number + best score
+// Pass-through scoring lives in @/lib/practiceScore (shared by self-paced and
+// synced modes); PASS_WINDOW_MS is imported for the progress-bar timing.
 const REST_THRESHOLD = 6; // suggest a rest day at this many consecutive days
 const COMPLETE_THRESHOLD = 80; // a move is "completed" once its best score crosses this
 const WARMUP_KEY = "dancemore_warmedUpDate";
@@ -115,10 +109,13 @@ export default function Page() {
     streak >= REST_THRESHOLD &&
     (view.kind === "library" || view.kind === "dashboard");
 
-  // Picking a move: Watch → Do → Get scored. Moves without any demo (YouTube
-  // or self-hosted clip) skip the watch beat entirely.
+  // Picking a move: Watch → Do → Get scored. Synced (dance-along) moves embed
+  // the video in practice itself, so they skip the standalone watch beat.
+  // Other moves with a clip get the watch step first.
   function startMove(move: Move) {
-    if (validYoutubeId(move) || move.demoVideo) {
+    if (isSynced(move)) {
+      proceedToPractice(move);
+    } else if (validYoutubeId(move) || move.demoVideo) {
       setView({ kind: "watch", move });
     } else {
       proceedToPractice(move);
@@ -137,6 +134,23 @@ export default function Page() {
     } else {
       setView({ kind: "warmup", move });
     }
+  }
+
+  // Finishing an attempt (self-paced OR synced) → RESULT, deciding the
+  // first-completion celebration against the stats snapshot taken before this
+  // attempt (plus a session guard so "Try Again" can't re-trigger it).
+  function finishAttempt(move: Move, peaks: number[]) {
+    const overall =
+      peaks.length > 0
+        ? Math.round(peaks.reduce((s, v) => s + v, 0) / peaks.length)
+        : 0;
+    const priorBest = bestScores[move.id] ?? 0;
+    const firstCompletion =
+      overall >= COMPLETE_THRESHOLD &&
+      priorBest < COMPLETE_THRESHOLD &&
+      !celebratedRef.current.has(move.id);
+    if (firstCompletion) celebratedRef.current.add(move.id);
+    setView({ kind: "result", move, peaks, firstCompletion });
   }
 
   // Logout asks for confirmation first; only confirming clears the session.
@@ -320,34 +334,30 @@ export default function Page() {
         />
       )}
 
-      {authed && view.kind === "practice" && (
-        <Practice
-          key={view.move.id}
-          move={view.move}
-          onFinish={(peaks) => {
-            // First-completion is decided HERE, against the stats snapshot
-            // taken before this attempt (plus a session guard so "Try Again"
-            // can't re-trigger it before stats refresh).
-            const overall =
-              peaks.length > 0
-                ? Math.round(peaks.reduce((s, v) => s + v, 0) / peaks.length)
-                : 0;
-            const priorBest = bestScores[view.move.id] ?? 0;
-            const firstCompletion =
-              overall >= COMPLETE_THRESHOLD &&
-              priorBest < COMPLETE_THRESHOLD &&
-              !celebratedRef.current.has(view.move.id);
-            if (firstCompletion) celebratedRef.current.add(view.move.id);
-            setView({ kind: "result", move: view.move, peaks, firstCompletion });
-          }}
-          onBack={() => setView({ kind: "library" })}
-          onRewatch={
-            view.move.demoVideo || validYoutubeId(view.move)
-              ? () => setView({ kind: "watch", move: view.move })
-              : undefined
-          }
-        />
-      )}
+      {authed &&
+        view.kind === "practice" &&
+        (isSynced(view.move) ? (
+          // Synced (dance-along): video on top, webcam below, scoring driven by
+          // the video timeline. Same scoring core, same RESULT.
+          <SyncedPractice
+            key={view.move.id}
+            move={view.move}
+            onFinish={(peaks) => finishAttempt(view.move, peaks)}
+            onBack={() => setView({ kind: "library" })}
+          />
+        ) : (
+          <Practice
+            key={view.move.id}
+            move={view.move}
+            onFinish={(peaks) => finishAttempt(view.move, peaks)}
+            onBack={() => setView({ kind: "library" })}
+            onRewatch={
+              view.move.demoVideo || validYoutubeId(view.move)
+                ? () => setView({ kind: "watch", move: view.move })
+                : undefined
+            }
+          />
+        ))}
 
       {authed && view.kind === "result" && (
         <Result
@@ -723,90 +733,52 @@ function Practice({
   const { videoRef, canvasRef, ready, error, errorKind, retry, ghostRef } =
     usePoseDetection((kp, angles) => {
       const el = scoreRef.current;
+      // Exact shared scoring core (gate, scorePose, smoothing, pass-through).
+      const r = scoreCheckpointFrame(
+        kp,
+        angles,
+        checkpoint.angles,
+        scoreBufRef.current,
+        passStartRef.current,
+        performance.now()
+      );
+      passStartRef.current = r.passStart;
 
-      // Full-body presence gate: never score or accrue hold-time on a partial
-      // body. Until the legs are in frame we pause evaluation and prompt the
-      // user; scoring resumes automatically once the full body returns.
-      if (!hasFullBody(kp)) {
+      if (r.state === "no-body") {
         if (el) {
           el.textContent =
             "Step back so we can see your whole body — legs included.";
           el.style.color = "#fbbf24";
           el.style.fontSize = "0.95rem";
         }
-        passStartRef.current = null;
         if (holdBarRef.current) holdBarRef.current.style.width = "0%";
         return;
       }
-
-      const raw = scorePose(checkpoint.angles, angles);
-
-      // Two smoothings from one raw-score buffer:
-      //  • display/best: SMOOTH_WINDOW frames (steady number, unchanged).
-      //  • pass detection: the last PASS_SMOOTH_WINDOW frames (responsive, so a
-      //    quick hit while moving isn't damped below threshold).
-      let smoothed: number | null = null;
-      let passScore: number | null = null;
-      if (raw !== null) {
-        const buf = scoreBufRef.current;
-        buf.push(raw);
-        if (buf.length > SMOOTH_WINDOW) buf.shift();
-        smoothed = Math.round(buf.reduce((s, v) => s + v, 0) / buf.length);
-        const k = Math.min(PASS_SMOOTH_WINDOW, buf.length);
-        const recent = buf.slice(buf.length - k);
-        passScore = Math.round(recent.reduce((s, v) => s + v, 0) / k);
-      }
-
-      if (smoothed === null) {
-        // Fewer than 4 shared joints visible — can't judge.
+      if (r.state === "get-into-frame") {
         if (el) {
           el.textContent = "Get into frame";
           el.style.color = "#aaa";
           el.style.fontSize = "1.1rem";
         }
-        passStartRef.current = null;
         if (holdBarRef.current) holdBarRef.current.style.width = "0%";
         return;
       }
 
+      const smoothed = r.smoothed as number;
       if (el) {
         el.textContent = String(smoothed);
         el.style.fontSize = "3.25rem";
         el.style.color = scoreColor(smoothed);
       }
-
-      // Track the peak (best) score reached for this checkpoint (unchanged —
-      // feeds the result breakdown and COMPLETE_THRESHOLD mastery logic).
+      // Peak (best) score — feeds the result breakdown + COMPLETE_THRESHOLD.
       if (smoothed > peaksRef.current[index]) {
         peaksRef.current[index] = smoothed;
         if (bestRef.current) bestRef.current.textContent = `Best: ${smoothed}`;
       }
-
-      // Pass-through: the checkpoint passes when the (lightly-smoothed) score
-      // stays at/above the threshold across a short window — long enough to be
-      // a real hit as you move through the pose, short enough that you don't
-      // have to stop. A single-frame noise spike can't sustain the window. A
-      // pass still requires the legs to participate (≥2 shared lower-body
-      // joints), so an upper-body-only match can never register as a pass.
-      const now = performance.now();
-      if (
-        passScore !== null &&
-        passScore >= PASS_THRESHOLD &&
-        passHasLegs(checkpoint.angles, angles)
-      ) {
-        if (passStartRef.current === null) passStartRef.current = now;
-        const inWindow = now - passStartRef.current;
-        if (holdBarRef.current) {
-          holdBarRef.current.style.width = `${Math.min(
-            100,
-            (inWindow / PASS_WINDOW_MS) * 100
-          )}%`;
-        }
-        if (inWindow >= PASS_WINDOW_MS) advance();
-      } else {
-        passStartRef.current = null;
-        if (holdBarRef.current) holdBarRef.current.style.width = "0%";
-      }
+      if (holdBarRef.current)
+        holdBarRef.current.style.width = `${Math.round(r.passProgress * 100)}%`;
+      // Self-paced: a completed pass-through advances to the next checkpoint.
+      if (r.passed) advance();
     }
   );
 

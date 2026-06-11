@@ -201,14 +201,14 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   );
 
   // ── No-clip fallback (Drew Test) ──
-  await page.click('button:has-text("Back to Moves")', { force: true });
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
   await page.click("text=Drew Test");
   await page.waitForSelector("text=Pose 1 of 3");
   check(
     "move without demoVideo skips WATCH",
     !(await page.isVisible('button:has-text("Practice this move")'))
   );
-  await page.click('button:has-text("Back to Moves")', { force: true });
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
 
   // ── PHASE 5: upload a dance ──
   await page.click("text=⬆ Upload a dance");
@@ -371,7 +371,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   );
 
   // ── 5.5: library badge + dashboard count reflect the new best ──
-  await page.click('button:has-text("Back to Moves")', { force: true });
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
   await page.waitForSelector("text=Pick a move to practice");
   await page.waitForTimeout(1000); // stats refetch
   const completedBadges = await page.locator("text=✓ Completed").count();
@@ -527,7 +527,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   );
   check("no JS error while practicing a low-confidence move", practiceError === null);
   page.off("pageerror", onErr);
-  await page.click('button:has-text("Back to Moves")', { force: true });
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
 
   // ── Full body present, WRONG pose: scores but must not falsely pass ──
   // Webcam is the full-body warrior; Side Step Reach checkpoints are neutral/
@@ -553,7 +553,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
     "full body + wrong pose does NOT falsely pass (still on Pose 1)",
     await page.isVisible("text=Pose 1 of 3")
   );
-  await page.click('button:has-text("Back to Moves")', { force: true });
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
 
   // ── Pass-validity: a legless (waist-up) checkpoint must never pass, even
   // with a full-body webcam scoring it high on the upper joints ──
@@ -588,7 +588,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   }
   await page.waitForSelector("text=Overall score");
   check("legless move still reaches RESULT via Skip", true);
-  await page.click('button:has-text("Back to Moves")', { force: true });
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
 
   // ── Longer session: a 6-checkpoint move runs end to end (Pose X of 6) ──
   // Built from the waist-up (legless) clip so it never auto-passes — lets us
@@ -625,7 +625,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   await page.waitForSelector("text=Overall score");
   const sixRows = await page.locator("text=/^\\d+\\.\\s/").count();
   check(`6-checkpoint move reaches RESULT with 6 breakdown rows (${sixRows})`, sixRows === 6);
-  await page.click('button:has-text("Back to Moves")', { force: true });
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
 
   // ── Camera-deny recovery ──
   // Real browsers throw NotAllowedError when the user denies; headless
@@ -861,28 +861,34 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
     const clickTimer = () =>
       ap.getByTestId("timer-btn").evaluate((el) => el.click());
 
-    // Cancel mid-countdown captures nothing: arm, then immediately toggle off
-    // (one click clears the interval synchronously, well before the ≥5s fire).
+    // Cancel captures nothing — bulletproof: arm then cancel in ONE synchronous
+    // task (two clicks, no await between), so the interval is created and
+    // cleared in the same tick and can never fire. (Avoids racing the 5s timer
+    // against test latency under heavy inference load.)
     const beforeCancel = await cpCount();
-    await clickTimer(); // arm
-    check(
-      "author timer: countdown overlay shows after arming",
-      await ap.getByTestId("timer-countdown").isVisible()
-    );
-    await clickTimer(); // cancel (single, synchronous)
-    // Wait past a full fresh 5s window: a cancelled timer captures nothing.
-    await ap.waitForTimeout(7000);
+    await ap.getByTestId("timer-btn").evaluate((el) => {
+      el.click(); // arm
+      el.click(); // cancel
+    });
+    await ap.waitForTimeout(7000); // past a full fresh 5s window
     check(
       "author timer: cancel mid-countdown captures nothing + overlay gone",
       !(await ap.getByTestId("timer-countdown").isVisible()) &&
         (await cpCount()) === beforeCancel
     );
 
-    // Re-arm and let it run to 0 → captures via the same path. The countdown
-    // can run slow under the CPU-backend inference load, so poll for the
-    // capture rather than assuming a fixed 5s.
+    // Re-arm and let it run to 0 → captures via the same path. Confirms the
+    // countdown overlay appears while armed, then the capture lands (the
+    // countdown can run slow under CPU load, so poll for the capture).
     const beforeTimed = await cpCount();
     await clickTimer();
+    check(
+      "author timer: countdown overlay shows while armed",
+      await ap
+        .waitForSelector('[data-testid="timer-countdown"]', { timeout: 8000 })
+        .then(() => true)
+        .catch(() => false)
+    );
     const timedCaptured = await ap
       .waitForFunction(
         (n) =>
@@ -1026,9 +1032,179 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
     await wb.close();
   }
 
+  // ── Synced (dance-along) mode ──
+  // We can't drive real YouTube playback headlessly, so inject a FAKE window.YT
+  // (the prod code only ever touches window.YT) whose getCurrentTime we control
+  // and whose onStateChange we can fire. Build a qualifying move via upload
+  // (youtubeId + timestamped checkpoints from dance.mp4) and drive video time.
+  const YT_FAKE = `
+    window.__ytTime = 0;
+    window.YT = {
+      PlayerState: { UNSTARTED:-1, ENDED:0, PLAYING:1, PAUSED:2, BUFFERING:3, CUED:5 },
+      Player: function(el, opts){
+        window.__ytPlayer = this;
+        this.opts = opts;
+        this.playVideo = function(){ window.__ytPlaying = true; };
+        this.pauseVideo = function(){ window.__ytPlaying = false; };
+        this.getCurrentTime = function(){ return window.__ytTime; };
+        this.getPlayerState = function(){ return 1; };
+        this.destroy = function(){};
+        var self = this;
+        setTimeout(function(){ opts.events && opts.events.onReady && opts.events.onReady({target:self}); }, 10);
+      }
+    };
+    window.__ytFire = function(s){ var p=window.__ytPlayer; if(p&&p.opts.events.onStateChange) p.opts.events.onStateChange({data:s, target:p}); };
+  `;
+
+  // Build a synced move (upload dance.mp4 + youtubeId, capturing at fixed times
+  // 1.0s and 3.0s so the checkpoint t values are known) and open it.
+  async function openSynced(y4mFile) {
+    const sb = await chromium.launch({
+      args: [
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        `--use-file-for-fake-video-capture=${y4mFile}`,
+      ],
+    });
+    const ctx = await sb.newContext({
+      permissions: ["camera"],
+      reducedMotion: "reduce",
+    });
+    await ctx.addInitScript(YT_FAKE);
+    const sp = await ctx.newPage();
+    await sp.goto("http://localhost:3000/");
+    await sp.fill('input[placeholder="Username"]', "demo");
+    await sp.fill('input[placeholder="Password"]', "demo1234");
+    await sp.click('button:has-text("Log in")');
+    await sp.waitForSelector("text=Pick a move to practice");
+    await sp.click("text=⬆ Upload a dance");
+    await sp.waitForSelector("text=Choose a video file");
+    await sp.setInputFiles('input[type="file"]', DANCE);
+    await sp.waitForSelector("text=Capture this frame", { timeout: 180000 });
+    while ((await sp.locator('button:has-text("✕ Remove")').count()) > 0)
+      await sp.locator('button:has-text("✕ Remove")').first().click();
+    for (const at of [1.0, 3.0]) {
+      const before = await sp
+        .locator('input[aria-label="Checkpoint name"]')
+        .count();
+      await sp.locator("video").evaluate(
+        (v, t) =>
+          new Promise((res) => {
+            v.pause();
+            v.addEventListener("seeked", () => res(), { once: true });
+            v.currentTime = t;
+          }),
+        at
+      );
+      await sp.click('button:has-text("Capture this frame")');
+      await sp.waitForFunction(
+        (k) =>
+          document.querySelectorAll('input[aria-label="Checkpoint name"]')
+            .length === k + 1,
+        before,
+        { timeout: 30000 }
+      );
+    }
+    await sp.fill('input[placeholder^="Move name"]', "Synced Move");
+    await sp.fill('input[placeholder^="YouTube"]', "dQw4w9WgXcQ");
+    await sp.click('button:has-text("Save move")');
+    await sp.waitForSelector('button.moveCard:has-text("Synced Move")');
+    await sp.click("text=Synced Move");
+    if (
+      await sp
+        .waitForSelector("text=Warm up first", { timeout: 2500 })
+        .then(() => true)
+        .catch(() => false)
+    )
+      await sp.click("text=Skip for now");
+    // Synced mode (no standalone Watch step).
+    await sp.waitForSelector("text=Dance along with the video", { timeout: 15000 });
+    return { sb, sp };
+  }
+
+  {
+    const { sb, sp } = await openSynced(Y4M); // full-body warrior webcam
+    check(
+      "synced: qualifying move opens dance-along (video on top + webcam + Start)",
+      (await sp.isVisible("text=Dance along with the video")) &&
+        (await sp.getByTestId("synced-start").count()) === 1 &&
+        (await sp.getByTestId("live-score").count()) === 1
+    );
+    // No scoring before Start; Start enables once the full body is in frame.
+    const startReady = await sp
+      .waitForFunction(
+        () => {
+          const b = document.querySelector('[data-testid="synced-start"]');
+          return b && !b.disabled;
+        },
+        null,
+        { timeout: 20000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    check("synced: Start gated until ready (onReady + full body), then enabled", startReady);
+    check(
+      "synced: no result before Start",
+      !(await sp.isVisible("text=Overall score"))
+    );
+
+    await sp.getByTestId("synced-start").evaluate((el) => el.click());
+
+    // Pause pauses scoring.
+    await sp.evaluate(() => {
+      window.__ytTime = 1.0;
+      window.__ytFire(window.YT.PlayerState.PAUSED);
+    });
+    await sp.waitForTimeout(1200);
+    check(
+      "synced: pausing the video pauses scoring (chip shows Paused)",
+      (await sp.getByTestId("live-score").innerText()).includes("Paused")
+    );
+    await sp.evaluate(() => window.__ytFire(window.YT.PlayerState.PLAYING));
+
+    // Drive the timeline through each checkpoint window; warrior webcam matches
+    // the warrior checkpoints, so each should pass as the video reaches it.
+    await sp.evaluate(() => (window.__ytTime = 1.0)); // checkpoint 0 window
+    await sp.waitForTimeout(3000);
+    await sp.evaluate(() => (window.__ytTime = 3.0)); // checkpoint 1 window
+    await sp.waitForTimeout(3000);
+    await sp.evaluate(() => (window.__ytTime = 4.2)); // past last window → finish
+    const reachedResult = await sp
+      .waitForSelector("text=Overall score", { timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+    check("synced: scored as it plays, reaches RESULT at the end", reachedResult);
+    const overall = await sp
+      .locator("text=Overall score")
+      .locator("xpath=following-sibling::div[1]")
+      .innerText()
+      .catch(() => "?");
+    check(
+      `synced: warrior matched the checkpoints → high overall ("${overall}")`,
+      /^\d{1,3}$/.test(overall.trim()) && parseInt(overall, 10) >= 70
+    );
+    await sp.screenshot({ path: "shot_synced.png" });
+    await sb.close();
+  }
+
+  {
+    // Standing out of frame (upper body only): the full-body gate keeps Start
+    // disabled — you can't even begin a synced run.
+    const { sb, sp } = await openSynced(WEBCAM_UPPER);
+    await sp.waitForTimeout(2500);
+    check(
+      "synced: legs out of frame → Start stays disabled (full-body gate enforced)",
+      await sp
+        .getByTestId("synced-start")
+        .evaluate((el) => el.disabled)
+        .catch(() => false)
+    );
+    await sb.close();
+  }
+
   await browser.close();
   console.log(
-    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png, shot_camera_denied.png, shot_author.png"
+    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png, shot_camera_denied.png, shot_author.png, shot_synced.png"
   );
   console.log(failures === 0 ? "\nALL E2E CHECKS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

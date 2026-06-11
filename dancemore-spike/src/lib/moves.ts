@@ -10,6 +10,9 @@ export type Checkpoint = {
   // target pose as a ghost skeleton. Optional: legacy checkpoints without it
   // simply show no ghost. Scoring uses `angles` only, never this.
   keypoints?: KP[];
+  // Seconds into the demo video where this pose occurs. Optional — only set
+  // for synced (dance-along) moves; absent ⇒ the move runs self-paced.
+  t?: number;
 };
 
 export type Move = {
@@ -21,8 +24,21 @@ export type Move = {
   // Watch-only — never analyzed or scored (cross-origin iframe). Takes
   // precedence over demoVideo. "REPLACE_ME" is treated as unset.
   youtubeId?: string;
+  // Global nudge (seconds) to align checkpoint `t` values to the YouTube
+  // timeline when the cut starts slightly before/after the checkpoint source.
+  videoOffset?: number;
   checkpoints: Checkpoint[]; // 2–3 per move
 };
+
+// A move runs in synced (dance-along) mode only when it has BOTH a usable
+// YouTube video AND at least one timestamped checkpoint. Otherwise it falls
+// through to the existing self-paced practice, unchanged.
+export function isSynced(move: Move): boolean {
+  return (
+    validYoutubeId(move) !== undefined &&
+    move.checkpoints.some((c) => typeof c.t === "number")
+  );
+}
 
 // A youtubeId that's actually usable (placeholder values don't count).
 // Accepts a bare video ID or a pasted URL in any common shape —

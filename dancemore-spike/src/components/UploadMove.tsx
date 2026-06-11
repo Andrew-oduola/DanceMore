@@ -44,6 +44,7 @@ export function UploadMove({
   const [candidates, setCandidates] = useState<Curated[]>([]);
   const [moveName, setMoveName] = useState("");
   const [description, setDescription] = useState("");
+  const [youtubeId, setYoutubeId] = useState("");
   const [mirror, setMirror] = useState(false);
   const [note, setNote] = useState("");
   const [lowConfHint, setLowConfHint] = useState(false);
@@ -136,17 +137,23 @@ export function UploadMove({
   function save() {
     if (!canSave || !url) return;
     savedRef.current = true;
+    const yt = youtubeId.trim();
     onSave({
       id: `upload-${Date.now().toString(36)}`,
       name: moveName.trim(),
       description: description.trim() || undefined,
       demoVideo: url,
+      // Linking a YouTube video makes this a synced (dance-along) move: the
+      // captured frame times (t) drive scoring against the YouTube timeline.
+      ...(yt ? { youtubeId: yt } : {}),
       checkpoints: kept.map((c) => ({
         name: c.name.trim() || "Pose",
         // Mirror is applied to BOTH representations at save time so the ghost
         // overlay and angle scoring always agree.
         angles: mirror ? mirrorAngles(c.angles) : c.angles,
         keypoints: mirror ? mirrorKeypoints(c.keypoints) : c.keypoints,
+        // Source-video timestamp of this checkpoint (for synced mode).
+        t: c.time,
       })),
     });
   }
@@ -376,6 +383,13 @@ export function UploadMove({
               value={moveName}
               onChange={(e) => setMoveName(e.target.value)}
               placeholder={`Move name (default: ${fileName})`}
+              style={input}
+            />
+            <input
+              type="text"
+              value={youtubeId}
+              onChange={(e) => setYoutubeId(e.target.value)}
+              placeholder="YouTube ID/URL of the same dance (optional → dance-along)"
               style={input}
             />
             <input
