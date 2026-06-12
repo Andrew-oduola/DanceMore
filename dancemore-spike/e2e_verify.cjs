@@ -20,6 +20,27 @@ const DANCE_WAISTUP = fx("dance_waistup.mp4"); // waist-up source: upper joints,
 const WEBCAM_PASSTHROUGH = fx("webcam_passthrough.y4m"); // matches only ~0.5s at a time
 const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-window)
 
+// A fake YouTube IFrame API so split-screen practice works deterministically in
+// headless (real YT playback isn't controllable). The prod code only ever
+// touches window.YT. Injected into every context.
+const YT_FAKE = `
+  window.__ytTime = 0;
+  window.YT = {
+    PlayerState: { UNSTARTED:-1, ENDED:0, PLAYING:1, PAUSED:2, BUFFERING:3, CUED:5 },
+    Player: function(el, opts){
+      window.__ytPlayer = this; this.opts = opts;
+      this.playVideo = function(){ window.__ytPlaying = true; };
+      this.pauseVideo = function(){ window.__ytPlaying = false; };
+      this.getCurrentTime = function(){ return window.__ytTime; };
+      this.getPlayerState = function(){ return 1; };
+      this.destroy = function(){};
+      var self = this;
+      setTimeout(function(){ opts.events && opts.events.onReady && opts.events.onReady({target:self}); }, 10);
+    }
+  };
+  window.__ytFire = function(s){ var p=window.__ytPlayer; if(p&&p.opts.events.onStateChange) p.opts.events.onStateChange({data:s, target:p}); };
+`;
+
 (async () => {
   const browser = await chromium.launch({
     args: [
@@ -47,6 +68,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
       return s;
     };
   });
+  await ctx.addInitScript(YT_FAKE);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("PAGE JS ERROR:", e.message));
 
@@ -148,45 +170,47 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   const badges = await page.locator("text=▶ Watch").count();
   check(`'▶ Watch' badges (found ${badges}, expect 3)`, badges === 3);
 
-  // ── Watch → warmup → practice (starter move; low scores → manual skip) ──
-  // Starters now carry real youtubeIds, so WATCH renders the privacy-enhanced
-  // embed (the self-hosted <video> path is still covered by the uploaded move).
+  // ── Split-screen for a YouTube move (no timestamps → self-paced scoring) ──
+  // Any move with a YouTube link now shows video-on-top + webcam-below; with no
+  // timestamps it runs the existing self-paced scoring (video = reference).
   await page.click("text=Side Step Reach");
-  await page.waitForSelector("text=Step side to side");
-  const video = page.locator("video");
-  const iframeSrc = await page.locator("iframe").getAttribute("src");
-  check(
-    `WATCH renders youtube-nocookie embed (${iframeSrc})`,
-    !!iframeSrc &&
-      iframeSrc.startsWith("https://www.youtube-nocookie.com/embed/ujREEgxEP7g")
-  );
-  check("camera NOT active during WATCH", (await gumCalls()) === 0);
-
-  await page.click('button:has-text("Practice this move")');
+  // No standalone Watch step now — warmup gates the first practice of the day.
   await page.waitForSelector("text=Warm up first");
   check("warmup gates first practice of the day", true);
   for (const box of await page.locator('input[type="checkbox"]').all())
     await box.check();
   await page.click('button:has-text("Start practicing")');
-  await page.waitForSelector("text=Pose 1 of 3");
-  await page.waitForTimeout(1200);
-  check("camera IS active during PRACTICE", (await gumCalls()) >= 1);
+  await page.waitForSelector("text=Dance along with the video");
   check(
-    "no ghost legend on a checkpoint without keypoints (placeholder move)",
-    !(await page.isVisible("text=line yourself up"))
+    "YouTube move → split-screen layout (video on top + webcam + Start)",
+    (await page.getByTestId("synced-start").count()) === 1 &&
+      (await page.getByTestId("live-score").count()) === 1
   );
+  await page.waitForTimeout(1200);
+  check("split-screen camera IS active", (await gumCalls()) >= 1);
+  const ssReady = await page
+    .waitForFunction(
+      () => {
+        const b = document.querySelector('[data-testid="synced-start"]');
+        return b && !b.disabled;
+      },
+      null,
+      { timeout: 20000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  check("split-screen Start enabled after onReady + full body", ssReady);
+  check(
+    "split-screen: no result before Start",
+    !(await page.isVisible("text=Overall score"))
+  );
+  await page.getByTestId("synced-start").evaluate((el) => el.click());
+  await page.waitForSelector("text=Pose 1 of 3"); // self-paced label
+  check("split-screen runs self-paced scoring (Pose 1 of 3)", true);
 
-  // rewatch round-trip releases the camera
-  await page.click("text=↺ Rewatch demo", { force: true }); // inference loop saturates main thread
-  await page.waitForSelector('button:has-text("Practice this move")');
-  await page.waitForTimeout(600);
-  check("practice camera tracks stopped on WATCH", (await liveTracks()) === 0);
-  await page.click('button:has-text("Skip")');
-  await page.waitForSelector("text=Pose 1 of 3");
-
-  // skip through (starter checkpoints won't match the warrior pose)
+  // Warrior webcam won't match the placeholder poses → advance via Skip / Next.
   for (let i = 0; i < 3; i++) {
-    await page.click('button:has-text("Skip / Next")', { force: true });
+    await page.getByTestId("skip-next").evaluate((el) => el.click());
     await page.waitForTimeout(400);
   }
   await page.waitForSelector("text=Overall score");
@@ -194,21 +218,28 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
     .waitForSelector("text=Attempt saved", { timeout: 10000 })
     .then(() => true)
     .catch(() => false);
-  check("result + 'Attempt saved'", saved1);
+  check("split-screen result + 'Attempt saved'", saved1);
   check(
     "NO celebration on a low-score attempt",
     !(await page.isVisible("text=mastered"))
   );
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click());
+  await page.waitForTimeout(600);
+  check("leaving practice stops the camera tracks", (await liveTracks()) === 0);
 
-  // ── No-clip fallback (Drew Test) ──
-  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
+  // ── No-video move (Drew Test) keeps the existing self-paced flow, no split-screen ──
   await page.click("text=Drew Test");
-  await page.waitForSelector("text=Pose 1 of 3");
+  await page.waitForSelector("text=Pose 1 of 3"); // straight to self-paced (warmed up already)
   check(
-    "move without demoVideo skips WATCH",
-    !(await page.isVisible('button:has-text("Practice this move")'))
+    "no-video move → existing self-paced flow (no split-screen, no Start)",
+    !(await page.isVisible("text=Dance along with the video")) &&
+      (await page.getByTestId("synced-start").count()) === 0
   );
-  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
+  check(
+    "no ghost legend on a keypoint-less move",
+    !(await page.isVisible("text=line yourself up"))
+  );
+  await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click());
 
   // ── PHASE 5: upload a dance ──
   await page.click("text=⬆ Upload a dance");
@@ -239,6 +270,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
 
   // hand-pick one via the scrubber. Wait for the frame to actually settle
   // (seeked) before capturing; under heavy CPU load retry the click once.
+  const video = page.locator("video"); // the UploadMove review player
   const beforeCount = await thumbs().count();
   await video.evaluate(
     (v) =>
@@ -299,8 +331,11 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
     .then(() => true)
     .catch(() => false);
   check("WATCH plays the uploaded clip (object URL)", uploadedClipPlays);
+  check("camera NOT active during WATCH (no live tracks)", (await liveTracks()) === 0);
   await page.click('button:has-text("Practice this move")');
   await page.waitForSelector("text=Pose 1 of 4");
+  await page.waitForTimeout(1000);
+  check("camera IS active during PRACTICE", (await liveTracks()) >= 1);
 
   // ── PHASE 5.6: ghost overlay on checkpoints WITH keypoints ──
   check(
@@ -530,10 +565,10 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   await page.locator('button:has-text("Back to Moves")').first().evaluate((el) => el.click()); // raw click avoids Playwright post-click nav-wait hang
 
   // ── Full body present, WRONG pose: scores but must not falsely pass ──
-  // Webcam is the full-body warrior; Side Step Reach checkpoints are neutral/
-  // reach poses, so it should score (legs in frame → gate open) but never pass.
-  await page.click("text=Side Step Reach");
-  await page.click('button:has-text("Practice this move")'); // youtubeId → WATCH
+  // Webcam is the full-body warrior; Drew Test's poses are different, so it
+  // should score (legs in frame → gate open) but never pass. (Drew Test is a
+  // no-video move → existing self-paced flow.)
+  await page.click("text=Drew Test");
   if (
     await page
       .waitForSelector("text=Warm up first", { timeout: 2000 })
@@ -658,14 +693,16 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
             ),
     });
   });
+  await deniedCtx.addInitScript(YT_FAKE);
   const p2 = await deniedCtx.newPage();
   await p2.goto("http://localhost:3000/");
   await p2.fill('input[placeholder="Username"]', "demo");
   await p2.fill('input[placeholder="Password"]', "demo1234");
   await p2.click('button:has-text("Log in")');
   await p2.waitForSelector("text=Pick a move to practice");
-  await p2.click("text=Side Step Reach");
-  await p2.click('button:has-text("Practice this move")');
+  // Drew Test is a no-video move → straight to self-paced practice; the webcam
+  // mounts immediately, so the (stubbed) denial surfaces the recovery overlay.
+  await p2.click("text=Drew Test");
   await p2.waitForSelector("text=Warm up first");
   await p2.click("text=Skip for now");
   await p2.waitForSelector("text=Pose 1 of 3");
@@ -714,7 +751,8 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   await deniedCtx.close();
 
   // ── Full-body presence gate (needs a different fake-camera file, so its own
-  // browser). A helper logs in as demo and enters practice on a starter move.
+  // browser). A helper logs in as demo and enters self-paced practice on the
+  // no-video Drew Test move (straight to scoring, no split-screen/Start).
   async function enterPractice(args) {
     const fb = await chromium.launch({
       args: [
@@ -731,8 +769,7 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
     await pg.fill('input[placeholder="Password"]', "demo1234");
     await pg.click('button:has-text("Log in")');
     await pg.waitForSelector("text=Pick a move to practice");
-    await pg.click("text=Side Step Reach");
-    await pg.click('button:has-text("Practice this move")');
+    await pg.click("text=Drew Test");
     if (
       await pg
         .waitForSelector("text=Warm up first", { timeout: 3000 })
@@ -1033,29 +1070,9 @@ const WEBCAM_BLIP = fx("webcam_blip.y4m"); // matches only ~0.1s (sub pass-windo
   }
 
   // ── Synced (dance-along) mode ──
-  // We can't drive real YouTube playback headlessly, so inject a FAKE window.YT
-  // (the prod code only ever touches window.YT) whose getCurrentTime we control
-  // and whose onStateChange we can fire. Build a qualifying move via upload
-  // (youtubeId + timestamped checkpoints from dance.mp4) and drive video time.
-  const YT_FAKE = `
-    window.__ytTime = 0;
-    window.YT = {
-      PlayerState: { UNSTARTED:-1, ENDED:0, PLAYING:1, PAUSED:2, BUFFERING:3, CUED:5 },
-      Player: function(el, opts){
-        window.__ytPlayer = this;
-        this.opts = opts;
-        this.playVideo = function(){ window.__ytPlaying = true; };
-        this.pauseVideo = function(){ window.__ytPlaying = false; };
-        this.getCurrentTime = function(){ return window.__ytTime; };
-        this.getPlayerState = function(){ return 1; };
-        this.destroy = function(){};
-        var self = this;
-        setTimeout(function(){ opts.events && opts.events.onReady && opts.events.onReady({target:self}); }, 10);
-      }
-    };
-    window.__ytFire = function(s){ var p=window.__ytPlayer; if(p&&p.opts.events.onStateChange) p.opts.events.onStateChange({data:s, target:p}); };
-  `;
-
+  // Reuses the top-level fake window.YT (controllable getCurrentTime +
+  // __ytFire). Build a qualifying move via upload (youtubeId + timestamped
+  // checkpoints from dance.mp4) and drive video time through the windows.
   // Build a synced move (upload dance.mp4 + youtubeId, capturing at fixed times
   // 1.0s and 3.0s so the checkpoint t values are known) and open it.
   async function openSynced(y4mFile) {

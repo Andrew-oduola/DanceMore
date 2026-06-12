@@ -30,14 +30,17 @@ export type Move = {
   checkpoints: Checkpoint[]; // 2–3 per move
 };
 
-// A move runs in synced (dance-along) mode only when it has BOTH a usable
-// YouTube video AND at least one timestamped checkpoint. Otherwise it falls
-// through to the existing self-paced practice, unchanged.
+// Any move with a usable YouTube video uses the split-screen layout (video on
+// top, webcam below) — drives the LAYOUT.
+export function hasVideo(move: Move): boolean {
+  return validYoutubeId(move) !== undefined;
+}
+
+// A move uses timeline-driven (synced) SCORING only when it ALSO has at least
+// one timestamped checkpoint. Without timestamps, a video move still shows the
+// split-screen but runs the existing self-paced scoring (video = reference).
 export function isSynced(move: Move): boolean {
-  return (
-    validYoutubeId(move) !== undefined &&
-    move.checkpoints.some((c) => typeof c.t === "number")
-  );
+  return hasVideo(move) && move.checkpoints.some((c) => typeof c.t === "number");
 }
 
 // A youtubeId that's actually usable (placeholder values don't count).

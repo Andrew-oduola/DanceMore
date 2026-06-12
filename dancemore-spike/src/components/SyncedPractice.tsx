@@ -10,21 +10,27 @@ import {
   scoreCheckpointFrame,
   activeCheckpoint,
   WINDOW_POST,
+  type FrameOutcome,
 } from "@/lib/practiceScore";
 import { loadYouTubeApi, type YTPlayer } from "@/lib/youtube";
 
 type Phase = "loading" | "prestart" | "running" | "finished";
 
-// Synced (dance-along) practice: the YouTube demo plays on top while the webcam
-// scores below. The video's playback TIME (never its pixels) selects which
-// checkpoint is active; scoring itself is the EXACT shared core
-// (scoreCheckpointFrame) — same gate, leg requirement, pass-through, thresholds.
+// Split-screen practice: the YouTube demo plays on top while the webcam scores
+// below. Layout is identical in both modes; scoring is the EXACT shared core
+// (scoreCheckpointFrame — same gate, leg requirement, pass-through, thresholds).
+//   • synced=true:  the video's playback TIME (never its pixels) selects the
+//     active checkpoint window.
+//   • synced=false: self-paced — the user advances by hitting each pose (or
+//     Skip/Next); the video plays above purely as a visual reference.
 export function SyncedPractice({
   move,
+  synced,
   onFinish,
   onBack,
 }: {
   move: Move;
+  synced: boolean;
   onFinish: (peaks: number[]) => void;
   onBack: () => void;
 }) {
@@ -32,7 +38,7 @@ export function SyncedPractice({
   const offset = move.videoOffset ?? 0;
 
   // Timestamped checkpoints, ascending by t, keeping their original indices so
-  // the result breakdown stays in move order.
+  // the result breakdown stays in move order. (Only used when synced.)
   const timed = useMemo(
     () =>
       move.checkpoints
@@ -42,7 +48,8 @@ export function SyncedPractice({
     [move]
   );
   const sortedTs = useMemo(() => timed.map((x) => x.cp.t as number), [timed]);
-  const lastWindowEnd = sortedTs[sortedTs.length - 1] + WINDOW_POST;
+  const lastWindowEnd =
+    timed.length > 0 ? sortedTs[sortedTs.length - 1] + WINDOW_POST : 0;
 
   // Live, per-frame state kept out of React.
   const scoreRef = useRef<HTMLDivElement>(null);
@@ -50,8 +57,11 @@ export function SyncedPractice({
   const peaksRef = useRef<number[]>(move.checkpoints.map(() => 0));
   const scoreBufRef = useRef<number[]>([]);
   const passStartRef = useRef<number | null>(null);
-  const activeSortedRef = useRef<number>(-1);
   const fullBodyRef = useRef(false);
+  // synced: active position in `timed`. self-paced: sequential checkpoint index.
+  const activeSortedRef = useRef<number>(-1);
+  const indexRef = useRef(0);
+  const advancingRef = useRef(false);
 
   const playerRef = useRef<YTPlayer | null>(null);
   const playerHostRef = useRef<HTMLDivElement>(null);
@@ -61,14 +71,18 @@ export function SyncedPractice({
 
   const [phase, setPhase] = useState<Phase>("loading");
   const [readyToStart, setReadyToStart] = useState(false);
-  // Active checkpoint (index into `timed`, or -1). Set from the sync loop only
-  // when it changes; drives the ghost overlay (in an effect) and the label.
-  const [activeSorted, setActiveSorted] = useState(-1);
-  const activeLabel = activeSorted >= 0 ? timed[activeSorted].cp.name : "";
+  const [activeSorted, setActiveSorted] = useState(-1); // ghost driver (synced)
+  const [index, setIndex] = useState(0); // ghost driver + label (self-paced)
   const setPhaseBoth = (p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
   };
+
+  const label = synced
+    ? activeSorted >= 0
+      ? timed[activeSorted].cp.name
+      : ""
+    : `Pose ${index + 1} of ${move.checkpoints.length}`;
 
   function writeChip(text: string, color: string, size: string) {
     const el = scoreRef.current;
@@ -76,6 +90,34 @@ export function SyncedPractice({
     el.textContent = text;
     el.style.color = color;
     el.style.fontSize = size;
+  }
+  function setBar(pct: number) {
+    if (holdBarRef.current)
+      holdBarRef.current.style.width = `${Math.round(pct * 100)}%`;
+  }
+
+  // Apply a scoring outcome to the chip + bar, recording the best score into
+  // `recordIndex` (the checkpoint's MOVE-order index).
+  function renderOutcome(r: FrameOutcome, recordIndex: number) {
+    if (r.state === "no-body") {
+      writeChip(
+        "Step back so we can see your whole body — legs included.",
+        "#fbbf24",
+        "0.95rem"
+      );
+      setBar(0);
+      return;
+    }
+    if (r.state === "get-into-frame") {
+      writeChip("Get into frame", "#aaa", "1.1rem");
+      setBar(0);
+      return;
+    }
+    const smoothed = r.smoothed as number;
+    writeChip(String(smoothed), scoreColor(smoothed), "3.25rem");
+    if (smoothed > peaksRef.current[recordIndex])
+      peaksRef.current[recordIndex] = smoothed;
+    setBar(r.passProgress);
   }
 
   function finish() {
@@ -88,6 +130,18 @@ export function SyncedPractice({
       /* player may be gone */
     }
     onFinish([...peaksRef.current]);
+  }
+
+  // Self-paced advance: hitting a pose (or Skip) moves to the next checkpoint.
+  function advanceSelf() {
+    if (advancingRef.current) return;
+    advancingRef.current = true;
+    if (indexRef.current + 1 < move.checkpoints.length) {
+      indexRef.current += 1;
+      setIndex(indexRef.current);
+    } else {
+      finish();
+    }
   }
 
   const { videoRef, canvasRef, ready, error, errorKind, retry, ghostRef } =
@@ -115,75 +169,77 @@ export function SyncedPractice({
       if (pausedRef.current) {
         writeChip("Paused", "#aaa", "1.1rem");
         passStartRef.current = null;
-        if (holdBarRef.current) holdBarRef.current.style.width = "0%";
+        setBar(0);
         return;
       }
 
-      const player = playerRef.current;
-      if (!player) return;
-      const vt = player.getCurrentTime() + offset;
-
-      // End once we're past the final checkpoint's window (don't wait out a
-      // long video tail); ENDED also finishes via onStateChange.
-      if (vt >= lastWindowEnd) {
-        finish();
+      if (synced) {
+        const player = playerRef.current;
+        if (!player) return;
+        const vt = player.getCurrentTime() + offset;
+        if (vt >= lastWindowEnd) {
+          finish();
+          return;
+        }
+        const p = activeCheckpoint(sortedTs, vt);
+        if (p === -1) {
+          writeChip("Get ready…", "#888", "1.1rem");
+          passStartRef.current = null;
+          setBar(0);
+          return;
+        }
+        if (p !== activeSortedRef.current) {
+          activeSortedRef.current = p;
+          scoreBufRef.current = [];
+          passStartRef.current = null;
+          setActiveSorted(p);
+        }
+        const r = scoreCheckpointFrame(
+          kp,
+          angles,
+          timed[p].cp.angles,
+          scoreBufRef.current,
+          passStartRef.current,
+          performance.now()
+        );
+        passStartRef.current = r.passStart;
+        renderOutcome(r, timed[p].i);
         return;
       }
 
-      const p = activeCheckpoint(sortedTs, vt);
-      if (p === -1) {
-        // Between windows — get ready for the next pose; not scoring.
-        writeChip("Get ready…", "#888", "1.1rem");
-        passStartRef.current = null;
-        if (holdBarRef.current) holdBarRef.current.style.width = "0%";
-        return;
-      }
-
-      if (p !== activeSortedRef.current) {
-        activeSortedRef.current = p;
-        scoreBufRef.current = [];
-        passStartRef.current = null;
-        setActiveSorted(p); // ghost is set from this in an effect
-      }
-
+      // Self-paced: score the current checkpoint; a pass advances.
+      const i = indexRef.current;
       const r = scoreCheckpointFrame(
         kp,
         angles,
-        timed[p].cp.angles,
+        move.checkpoints[i].angles,
         scoreBufRef.current,
         passStartRef.current,
         performance.now()
       );
       passStartRef.current = r.passStart;
-
-      if (r.state === "no-body") {
-        writeChip(
-          "Step back so we can see your whole body — legs included.",
-          "#fbbf24",
-          "0.95rem"
-        );
-        if (holdBarRef.current) holdBarRef.current.style.width = "0%";
-        return;
-      }
-      if (r.state === "get-into-frame") {
-        writeChip("Get into frame", "#aaa", "1.1rem");
-        if (holdBarRef.current) holdBarRef.current.style.width = "0%";
-        return;
-      }
-
-      const smoothed = r.smoothed as number;
-      writeChip(String(smoothed), scoreColor(smoothed), "3.25rem");
-      const orig = timed[p].i; // record best in MOVE order
-      if (smoothed > peaksRef.current[orig]) peaksRef.current[orig] = smoothed;
-      if (holdBarRef.current)
-        holdBarRef.current.style.width = `${Math.round(r.passProgress * 100)}%`;
+      renderOutcome(r, i);
+      if (r.passed) advanceSelf();
     });
 
   // Show the active checkpoint's pose as a ghost on the webcam.
   useEffect(() => {
-    ghostRef.current =
-      activeSorted >= 0 ? (timed[activeSorted].cp.keypoints ?? null) : null;
-  }, [activeSorted, timed, ghostRef]);
+    const cp = synced
+      ? activeSorted >= 0
+        ? timed[activeSorted].cp
+        : null
+      : move.checkpoints[index];
+    ghostRef.current = cp?.keypoints ?? null;
+  }, [synced, activeSorted, index, timed, move, ghostRef]);
+
+  // Self-paced: reset per-checkpoint live state when the checkpoint changes.
+  useEffect(() => {
+    if (synced) return;
+    advancingRef.current = false;
+    passStartRef.current = null;
+    scoreBufRef.current = [];
+    setBar(0);
+  }, [index, synced]);
 
   // Create the YouTube player once (IFrame API, privacy host). Scoring stays in
   // "loading" until onReady fires.
@@ -209,7 +265,9 @@ export function SyncedPractice({
               if (s === YT.PlayerState.PAUSED || s === YT.PlayerState.BUFFERING)
                 pausedRef.current = true;
               else if (s === YT.PlayerState.PLAYING) pausedRef.current = false;
-              else if (s === YT.PlayerState.ENDED) finish();
+              // Only the synced timeline ends the attempt on video end; in
+              // self-paced the video is just a reference.
+              else if (s === YT.PlayerState.ENDED && synced) finish();
             },
           },
         });
@@ -240,6 +298,8 @@ export function SyncedPractice({
     }
   }
 
+  const running = phase === "running";
+
   return (
     <div
       style={{
@@ -254,12 +314,10 @@ export function SyncedPractice({
         <div style={{ fontSize: "1.35rem", fontWeight: 700 }}>{move.name}</div>
         <div style={{ color: "#888", marginTop: 2 }}>
           Dance along with the video
-          {phase === "running" && activeLabel && (
+          {running && label && (
             <>
               {" · "}
-              <span style={{ color: "#22d3ee", fontWeight: 600 }}>
-                {activeLabel}
-              </span>
+              <span style={{ color: "#22d3ee", fontWeight: 600 }}>{label}</span>
             </>
           )}
         </div>
@@ -330,7 +388,7 @@ export function SyncedPractice({
               textAlign: "center",
             }}
           >
-            {phase === "running" ? "Get ready…" : "Step into frame to start"}
+            {running ? "Get ready…" : "Step into frame to start"}
           </div>
         </div>
 
@@ -360,12 +418,14 @@ export function SyncedPractice({
 
       <div style={{ color: "#888", fontSize: "0.8rem" }}>
         <span style={{ color: "#ff40ff" }}>⬤</span> target pose ·{" "}
-        <span style={{ color: "cyan" }}>⬤</span> you — hit each pose as the
-        video reaches it
+        <span style={{ color: "cyan" }}>⬤</span> you —{" "}
+        {synced
+          ? "hit each pose as the video reaches it"
+          : "hit each pose to advance; the video is your reference"}
       </div>
 
       <div style={{ display: "flex", gap: 12 }}>
-        {phase !== "running" && phase !== "finished" && (
+        {!running && phase !== "finished" && (
           <button
             onClick={start}
             data-testid="synced-start"
@@ -376,7 +436,8 @@ export function SyncedPractice({
               fontWeight: 700,
               borderRadius: 8,
               border: "1px solid #14532d",
-              background: phase === "prestart" && readyToStart ? "#16a34a" : "#1a1a1a",
+              background:
+                phase === "prestart" && readyToStart ? "#16a34a" : "#1a1a1a",
               color: phase === "prestart" && readyToStart ? "#04130a" : "#666",
               cursor:
                 phase === "prestart" && readyToStart ? "pointer" : "not-allowed",
@@ -387,6 +448,12 @@ export function SyncedPractice({
               : readyToStart
                 ? "Start ▶"
                 : "Step into frame…"}
+          </button>
+        )}
+        {/* Self-paced keeps the manual Skip / Next so a move is never stuck. */}
+        {running && !synced && (
+          <button onClick={advanceSelf} data-testid="skip-next" style={btn}>
+            Skip / Next
           </button>
         )}
         <button onClick={onBack} style={{ ...btn, background: "#111" }}>

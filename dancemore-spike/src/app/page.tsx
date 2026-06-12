@@ -8,7 +8,13 @@ import {
   useSyncExternalStore,
 } from "react";
 import Link from "next/link";
-import { loadMoves, validYoutubeId, isSynced, type Move } from "@/lib/moves";
+import {
+  loadMoves,
+  validYoutubeId,
+  hasVideo,
+  isSynced,
+  type Move,
+} from "@/lib/moves";
 import { scoreCheckpointFrame } from "@/lib/practiceScore";
 import { SyncedPractice } from "@/components/SyncedPractice";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
@@ -109,13 +115,13 @@ export default function Page() {
     streak >= REST_THRESHOLD &&
     (view.kind === "library" || view.kind === "dashboard");
 
-  // Picking a move: Watch → Do → Get scored. Synced (dance-along) moves embed
-  // the video in practice itself, so they skip the standalone watch beat.
-  // Other moves with a clip get the watch step first.
+  // Picking a move: any move with a YouTube link embeds the video in the
+  // split-screen practice itself, so it skips the standalone watch beat. A
+  // self-hosted-clip-only move still gets the watch step first.
   function startMove(move: Move) {
-    if (isSynced(move)) {
+    if (hasVideo(move)) {
       proceedToPractice(move);
-    } else if (validYoutubeId(move) || move.demoVideo) {
+    } else if (move.demoVideo) {
       setView({ kind: "watch", move });
     } else {
       proceedToPractice(move);
@@ -336,12 +342,14 @@ export default function Page() {
 
       {authed &&
         view.kind === "practice" &&
-        (isSynced(view.move) ? (
-          // Synced (dance-along): video on top, webcam below, scoring driven by
-          // the video timeline. Same scoring core, same RESULT.
+        (hasVideo(view.move) ? (
+          // Split-screen: video on top, webcam below. Timeline-driven scoring
+          // when the move has timestamps; otherwise self-paced with the video
+          // as a visual reference. Same scoring core, same RESULT.
           <SyncedPractice
             key={view.move.id}
             move={view.move}
+            synced={isSynced(view.move)}
             onFinish={(peaks) => finishAttempt(view.move, peaks)}
             onBack={() => setView({ kind: "library" })}
           />
