@@ -182,29 +182,30 @@ const YT_FAKE = `
   await page.click('button:has-text("Start practicing")');
   await page.waitForSelector('[data-testid="synced-practice"]');
   check(
-    "YouTube move → split-screen layout (video on top + webcam + Start)",
-    (await page.getByTestId("synced-start").count()) === 1 &&
-      (await page.getByTestId("live-score").count()) === 1
+    "YouTube move → split-screen layout (video on top + webcam, no Start button)",
+    (await page.getByTestId("live-score").count()) === 1 &&
+      (await page.getByTestId("synced-start").count()) === 0
   );
   await page.waitForTimeout(1200);
   check("split-screen camera IS active", (await gumCalls()) >= 1);
-  const ssReady = await page
+  // Auto-start: full body (warrior webcam) held in frame → countdown → run, no
+  // click. Confirm a result isn't reached before it starts.
+  check(
+    "split-screen: no result before auto-start",
+    !(await page.isVisible("text=Overall score"))
+  );
+  const autoStarted = await page
     .waitForFunction(
-      () => {
-        const b = document.querySelector('[data-testid="synced-start"]');
-        return b && !b.disabled;
-      },
+      () =>
+        document
+          .querySelector('[data-testid="synced-practice"]')
+          ?.getAttribute("data-phase") === "running",
       null,
       { timeout: 20000 }
     )
     .then(() => true)
     .catch(() => false);
-  check("split-screen Start enabled after onReady + full body", ssReady);
-  check(
-    "split-screen: no result before Start",
-    !(await page.isVisible("text=Overall score"))
-  );
-  await page.getByTestId("synced-start").evaluate((el) => el.click());
+  check("split-screen AUTO-STARTS when full body in frame (no click)", autoStarted);
   await page.waitForSelector("text=Pose 1 of 3"); // self-paced label
   check("split-screen runs self-paced scoring (Pose 1 of 3)", true);
 
@@ -231,9 +232,8 @@ const YT_FAKE = `
   await page.click("text=Drew Test");
   await page.waitForSelector("text=Pose 1 of 3"); // straight to self-paced (warmed up already)
   check(
-    "no-video move → existing self-paced flow (no split-screen, no Start)",
-    !(await page.isVisible('[data-testid="synced-practice"]')) &&
-      (await page.getByTestId("synced-start").count()) === 0
+    "no-video move → existing self-paced flow (no split-screen)",
+    !(await page.isVisible('[data-testid="synced-practice"]'))
   );
   check(
     "no ghost legend on a keypoint-less move",
@@ -1142,30 +1142,27 @@ const YT_FAKE = `
   {
     const { sb, sp } = await openSynced(Y4M); // full-body warrior webcam
     check(
-      "synced: qualifying move opens dance-along (video on top + webcam + Start)",
+      "synced: qualifying move opens dance-along (video on top + webcam)",
       (await sp.isVisible('[data-testid="synced-practice"]')) &&
-        (await sp.getByTestId("synced-start").count()) === 1 &&
         (await sp.getByTestId("live-score").count()) === 1
     );
-    // No scoring before Start; Start enables once the full body is in frame.
-    const startReady = await sp
+    check(
+      "synced: no result before it starts",
+      !(await sp.isVisible("text=Overall score"))
+    );
+    // Auto-start: full body held in frame → countdown → run (no click).
+    const syncedAutoStarted = await sp
       .waitForFunction(
-        () => {
-          const b = document.querySelector('[data-testid="synced-start"]');
-          return b && !b.disabled;
-        },
+        () =>
+          document
+            .querySelector('[data-testid="synced-practice"]')
+            ?.getAttribute("data-phase") === "running",
         null,
         { timeout: 20000 }
       )
       .then(() => true)
       .catch(() => false);
-    check("synced: Start gated until ready (onReady + full body), then enabled", startReady);
-    check(
-      "synced: no result before Start",
-      !(await sp.isVisible("text=Overall score"))
-    );
-
-    await sp.getByTestId("synced-start").evaluate((el) => el.click());
+    check("synced: AUTO-STARTS when full body in frame (no click)", syncedAutoStarted);
 
     // Pause pauses scoring.
     await sp.evaluate(() => {
@@ -1205,16 +1202,27 @@ const YT_FAKE = `
   }
 
   {
-    // Standing out of frame (upper body only): the full-body gate keeps Start
-    // disabled — you can't even begin a synced run.
+    // Legs out of frame (upper body only): the full-body gate prevents
+    // auto-start — it never accumulates a stable full body, so it never leaves
+    // prestart (always showing the step-back prompt) and never starts. This is
+    // the exact `!hasFullBody` revert path a mid-countdown cancel reuses: lose
+    // the full body and it falls straight back to this prompt.
     const { sb, sp } = await openSynced(WEBCAM_UPPER);
-    await sp.waitForTimeout(2500);
+    let everLeftPrestart = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 9000) {
+      const phase = await sp
+        .getByTestId("synced-practice")
+        .getAttribute("data-phase")
+        .catch(() => null);
+      if (phase !== "prestart" && phase !== "loading") everLeftPrestart = true;
+      await sp.waitForTimeout(250);
+    }
     check(
-      "synced: legs out of frame → Start stays disabled (full-body gate enforced)",
-      await sp
-        .getByTestId("synced-start")
-        .evaluate((el) => el.disabled)
-        .catch(() => false)
+      "auto-start: legs out of frame → never starts; holds the step-back prompt",
+      !everLeftPrestart &&
+        !(await sp.isVisible("text=Overall score")) &&
+        (await sp.getByTestId("live-score").innerText()).includes("Step back")
     );
     await sb.close();
   }

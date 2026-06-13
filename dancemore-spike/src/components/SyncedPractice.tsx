@@ -14,7 +14,14 @@ import {
 } from "@/lib/practiceScore";
 import { loadYouTubeApi, type YTPlayer } from "@/lib/youtube";
 
-type Phase = "loading" | "prestart" | "running" | "finished";
+type Phase = "loading" | "prestart" | "countdown" | "running" | "finished";
+
+// Auto-start: once the player is ready and the full body has been in frame
+// continuously for STABLE_MS, run a COUNTDOWN_SECS countdown, then start — no
+// button press (which would be unreachable, since reaching it pulls the legs
+// out of frame).
+const STABLE_MS = 1000;
+const COUNTDOWN_SECS = 3;
 
 // Split-screen practice: the YouTube demo plays on top while the webcam scores
 // below. Layout is identical in both modes; scoring is the EXACT shared core
@@ -57,7 +64,6 @@ export function SyncedPractice({
   const peaksRef = useRef<number[]>(move.checkpoints.map(() => 0));
   const scoreBufRef = useRef<number[]>([]);
   const passStartRef = useRef<number | null>(null);
-  const fullBodyRef = useRef(false);
   // synced: active position in `timed`. self-paced: sequential checkpoint index.
   const activeSortedRef = useRef<number>(-1);
   const indexRef = useRef(0);
@@ -68,15 +74,62 @@ export function SyncedPractice({
   const phaseRef = useRef<Phase>("loading");
   const pausedRef = useRef(false);
   const finishedRef = useRef(false);
+  // Auto-start bookkeeping.
+  const stableStartRef = useRef<number | null>(null); // when full body became continuously true
+  const countdownStartRef = useRef<number | null>(null); // when the countdown began
+  const lastBeepRef = useRef(0);
+  const audioRef = useRef<AudioContext | null>(null);
 
   const [phase, setPhase] = useState<Phase>("loading");
-  const [readyToStart, setReadyToStart] = useState(false);
+  const [countdownNum, setCountdownNum] = useState<number | null>(null);
   const [activeSorted, setActiveSorted] = useState(-1); // ghost driver (synced)
   const [index, setIndex] = useState(0); // ghost driver + label (self-paced)
   const setPhaseBoth = (p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
   };
+
+  // A short Web Audio tone for the countdown beeps + the go tone (no assets).
+  function tone(freq: number, durationMs: number, type: OscillatorType = "sine") {
+    try {
+      const Ctx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = audioRef.current ?? (audioRef.current = new Ctx());
+      if (ctx.state === "suspended") void ctx.resume();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.3, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+      osc.start(now);
+      osc.stop(now + durationMs / 1000 + 0.02);
+    } catch {
+      /* audio is a nicety; never let it block start */
+    }
+  }
+
+  // Begin the run: play the video and start scoring. Called by auto-start.
+  function beginRun() {
+    if (phaseRef.current === "running") return;
+    finishedRef.current = false;
+    stableStartRef.current = null;
+    countdownStartRef.current = null;
+    setCountdownNum(null);
+    setPhaseBoth("running");
+    try {
+      playerRef.current?.playVideo();
+    } catch {
+      /* ignore */
+    }
+  }
 
   const label = synced
     ? activeSorted >= 0
@@ -148,19 +201,56 @@ export function SyncedPractice({
     usePoseDetection((kp, angles) => {
       const full = hasFullBody(kp);
 
-      // Pre-start: gate the Start button on the full body being in frame.
-      if (phaseRef.current === "prestart") {
-        if (full !== fullBodyRef.current) {
-          fullBodyRef.current = full;
-          setReadyToStart(full);
-        }
-        if (full) writeChip("Ready — press Start", "#4ade80", "1.1rem");
-        else
+      // Auto-start: prompt for the full body, then count down once it's stably
+      // in frame (and the player is ready, i.e. we're past "loading").
+      if (phaseRef.current === "prestart" || phaseRef.current === "countdown") {
+        const now = performance.now();
+
+        if (!full) {
+          // Lost the full body — reset stability and cancel any countdown.
+          stableStartRef.current = null;
+          if (phaseRef.current === "countdown") {
+            setPhaseBoth("prestart");
+            countdownStartRef.current = null;
+            setCountdownNum(null);
+          }
           writeChip(
             "Step back so we can see your whole body — legs included.",
             "#fbbf24",
             "0.95rem"
           );
+          return;
+        }
+
+        if (stableStartRef.current === null) stableStartRef.current = now;
+
+        if (phaseRef.current === "prestart") {
+          if (now - stableStartRef.current < STABLE_MS) {
+            writeChip("Hold still — starting…", "#4ade80", "1.1rem");
+            return;
+          }
+          // Stable long enough → begin the countdown.
+          setPhaseBoth("countdown");
+          countdownStartRef.current = now;
+          lastBeepRef.current = COUNTDOWN_SECS + 1;
+        }
+
+        // Countdown.
+        const remaining = Math.ceil(
+          COUNTDOWN_SECS - (now - (countdownStartRef.current as number)) / 1000
+        );
+        if (remaining > 0) {
+          if (remaining < lastBeepRef.current) {
+            lastBeepRef.current = remaining;
+            setCountdownNum(remaining);
+            tone(880, 120); // beep on 3 / 2 / 1
+          }
+          writeChip("Get ready…", "#fff", "1.1rem");
+          return;
+        }
+        // Countdown finished → auto-start.
+        tone(1320, 260, "square");
+        beginRun();
         return;
       }
 
@@ -287,16 +377,8 @@ export function SyncedPractice({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoId]);
 
-  function start() {
-    if (phaseRef.current !== "prestart" || !readyToStart) return;
-    finishedRef.current = false;
-    setPhaseBoth("running");
-    try {
-      playerRef.current?.playVideo();
-    } catch {
-      /* ignore */
-    }
-  }
+  // Release the audio context on unmount.
+  useEffect(() => () => void audioRef.current?.close(), []);
 
   const running = phase === "running";
 
@@ -307,6 +389,7 @@ export function SyncedPractice({
     <div
       className="practice-fit"
       data-testid="synced-practice"
+      data-phase={phase}
       style={{
         position: "fixed",
         inset: 0,
@@ -454,44 +537,45 @@ export function SyncedPractice({
             </div>
           </div>
 
-          {/* Start / Skip overlaid on the webcam so they don't add a tall row. */}
-          <div
-            style={{
-              position: "absolute",
-              left: 0,
-              right: 0,
-              bottom: 28,
-              display: "flex",
-              gap: 10,
-              justifyContent: "center",
-            }}
-          >
-            {!running && phase !== "finished" && (
-              <button
-                onClick={start}
-                data-testid="synced-start"
-                disabled={phase !== "prestart" || !readyToStart}
+          {/* Big auto-start countdown, readable from across the room. */}
+          {countdownNum !== null && (
+            <div
+              data-testid="countdown"
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                pointerEvents: "none",
+              }}
+            >
+              <span
                 style={{
-                  padding: "10px 24px",
-                  fontSize: "1rem",
-                  fontWeight: 700,
-                  borderRadius: 8,
-                  border: "1px solid #14532d",
-                  background:
-                    phase === "prestart" && readyToStart ? "#16a34a" : "rgba(20,20,20,0.85)",
-                  color: phase === "prestart" && readyToStart ? "#04130a" : "#888",
-                  cursor:
-                    phase === "prestart" && readyToStart ? "pointer" : "not-allowed",
+                  fontSize: "6rem",
+                  fontWeight: 800,
+                  color: "#fff",
+                  lineHeight: 1,
+                  textShadow: "0 4px 24px rgba(0,0,0,0.8)",
                 }}
               >
-                {phase === "loading"
-                  ? "Loading…"
-                  : readyToStart
-                    ? "Start ▶"
-                    : "Step into frame…"}
-              </button>
-            )}
-            {running && !synced && (
+                {countdownNum}
+              </span>
+            </div>
+          )}
+
+          {/* Self-paced keeps the manual Skip / Next overlaid on the webcam. */}
+          {running && !synced && (
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 28,
+                display: "flex",
+                justifyContent: "center",
+              }}
+            >
               <button
                 onClick={advanceSelf}
                 data-testid="skip-next"
@@ -499,8 +583,8 @@ export function SyncedPractice({
               >
                 Skip / Next
               </button>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Pass-through progress bar. */}
           <div
