@@ -180,7 +180,7 @@ const YT_FAKE = `
   for (const box of await page.locator('input[type="checkbox"]').all())
     await box.check();
   await page.click('button:has-text("Start practicing")');
-  await page.waitForSelector("text=Dance along with the video");
+  await page.waitForSelector('[data-testid="synced-practice"]');
   check(
     "YouTube move → split-screen layout (video on top + webcam + Start)",
     (await page.getByTestId("synced-start").count()) === 1 &&
@@ -232,7 +232,7 @@ const YT_FAKE = `
   await page.waitForSelector("text=Pose 1 of 3"); // straight to self-paced (warmed up already)
   check(
     "no-video move → existing self-paced flow (no split-screen, no Start)",
-    !(await page.isVisible("text=Dance along with the video")) &&
+    !(await page.isVisible('[data-testid="synced-practice"]')) &&
       (await page.getByTestId("synced-start").count()) === 0
   );
   check(
@@ -868,7 +868,7 @@ const YT_FAKE = `
       "author: full body → no step-back prompt",
       (await promptOpacity(ap)) === "0"
     );
-    await ap.click('button:has-text("Add Checkpoint")');
+    await ap.locator('button:has-text("Add Checkpoint")').first().evaluate((el) => el.click()); // raw click avoids post-click nav-wait hang
     await ap.waitForTimeout(500);
     check(
       "author: full-body capture succeeds (1 checkpoint)",
@@ -883,7 +883,7 @@ const YT_FAKE = `
       (await ap.locator("img[alt^='Pose']").count()) === 1
     );
     // Capturing the same pose again warns about similarity.
-    await ap.click('button:has-text("Add Checkpoint")');
+    await ap.locator('button:has-text("Add Checkpoint")').first().evaluate((el) => el.click()); // raw click avoids post-click nav-wait hang
     await ap.waitForTimeout(500);
     check(
       "author: near-identical second pose warns 'very similar'",
@@ -947,7 +947,7 @@ const YT_FAKE = `
       "author: legs out of frame → step-back prompt visible",
       (await promptOpacity(ap)) === "1"
     );
-    await ap.click('button:has-text("Add Checkpoint")');
+    await ap.locator('button:has-text("Add Checkpoint")').first().evaluate((el) => el.click()); // raw click avoids post-click nav-wait hang
     await ap.waitForTimeout(400);
     check(
       "author: capture refused when legs aren't in frame",
@@ -1135,7 +1135,7 @@ const YT_FAKE = `
     )
       await sp.click("text=Skip for now");
     // Synced mode (no standalone Watch step).
-    await sp.waitForSelector("text=Dance along with the video", { timeout: 15000 });
+    await sp.waitForSelector('[data-testid="synced-practice"]', { timeout: 15000 });
     return { sb, sp };
   }
 
@@ -1143,7 +1143,7 @@ const YT_FAKE = `
     const { sb, sp } = await openSynced(Y4M); // full-body warrior webcam
     check(
       "synced: qualifying move opens dance-along (video on top + webcam + Start)",
-      (await sp.isVisible("text=Dance along with the video")) &&
+      (await sp.isVisible('[data-testid="synced-practice"]')) &&
         (await sp.getByTestId("synced-start").count()) === 1 &&
         (await sp.getByTestId("live-score").count()) === 1
     );

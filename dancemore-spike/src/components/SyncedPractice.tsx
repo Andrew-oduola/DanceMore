@@ -300,165 +300,232 @@ export function SyncedPractice({
 
   const running = phase === "running";
 
+  // One viewport tall, no scrolling: a fixed flex column where the two media
+  // panels split the available height and scale DOWN to fit. The chrome
+  // (header + controls) is kept thin so both panels stay fully visible.
   return (
     <div
+      className="practice-fit"
+      data-testid="synced-practice"
       style={{
-        width: "100%",
+        position: "fixed",
+        inset: 0,
+        zIndex: 40,
         display: "flex",
         flexDirection: "column",
-        gap: 14,
-        alignItems: "center",
+        gap: 6,
+        padding: 8,
+        overflow: "hidden",
+        background: "var(--background)",
       }}
     >
-      <div style={{ width: "100%", textAlign: "center" }}>
-        <div style={{ fontSize: "1.35rem", fontWeight: 700 }}>{move.name}</div>
-        <div style={{ color: "#888", marginTop: 2 }}>
-          Dance along with the video
+      {/* Slim header bar: title + step on a single small line; nav replaced by
+          a Back button so it doesn't add a tall block. */}
+      <div
+        style={{
+          flex: "0 0 auto",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          fontSize: "0.85rem",
+          minWidth: 0,
+        }}
+      >
+        <span className="wordmark" style={{ fontSize: "1rem", flex: "0 0 auto" }}>
+          DanceMore
+        </span>
+        <span
+          style={{
+            color: "#bbb",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+            flex: 1,
+          }}
+        >
+          {move.name}
           {running && label && (
-            <>
-              {" · "}
-              <span style={{ color: "#22d3ee", fontWeight: 600 }}>{label}</span>
-            </>
+            <span style={{ color: "#22d3ee", fontWeight: 600 }}> · {label}</span>
+          )}
+        </span>
+        <button
+          onClick={onBack}
+          style={{ ...btn, flex: "0 0 auto", padding: "6px 12px", fontSize: "0.82rem" }}
+        >
+          ← Back
+        </button>
+      </div>
+
+      {/* Video panel (top) — shares half the height; scales down to fit. */}
+      <div
+        style={{
+          flex: "1 1 0",
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <div
+          className="yt-fit"
+          style={{
+            position: "relative",
+            height: "100%",
+            width: "auto",
+            maxWidth: "100%",
+            aspectRatio: "16 / 9",
+            background: "#000",
+            borderRadius: 8,
+            overflow: "hidden",
+          }}
+        >
+          <div ref={playerHostRef} style={{ width: "100%", height: "100%" }} />
+          {phase === "loading" && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#fff",
+                background: "rgba(0,0,0,0.4)",
+              }}
+            >
+              Loading video…
+            </div>
           )}
         </div>
       </div>
 
-      {/* Demo video on top (IFrame Player API replaces this div). */}
+      {/* Webcam panel (bottom) — shares the other half; ghost + gate intact. */}
       <div
         style={{
-          position: "relative",
-          width: "100%",
-          aspectRatio: "16 / 9",
-          background: "#000",
-          borderRadius: 8,
-          overflow: "hidden",
+          flex: "1 1 0",
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
         }}
       >
-        <div ref={playerHostRef} style={{ width: "100%", height: "100%" }} />
-        {phase === "loading" && (
+        <CameraStage
+          videoRef={videoRef}
+          canvasRef={canvasRef}
+          ready={ready}
+          error={error}
+          errorKind={errorKind}
+          onRetry={retry}
+          containerStyle={{
+            width: "auto",
+            height: "100%",
+            maxWidth: "100%",
+            aspectRatio: "4 / 3",
+          }}
+        >
           <div
             style={{
               position: "absolute",
-              inset: 0,
+              top: 10,
+              left: 0,
+              right: 0,
               display: "flex",
-              alignItems: "center",
               justifyContent: "center",
-              color: "#fff",
-              background: "rgba(0,0,0,0.4)",
+              pointerEvents: "none",
             }}
           >
-            Loading video…
+            <div
+              ref={scoreRef}
+              data-testid="live-score"
+              style={{
+                fontWeight: 800,
+                fontSize: "1.1rem",
+                lineHeight: 1.1,
+                color: "#aaa",
+                padding: "8px 18px",
+                borderRadius: 14,
+                background: "rgba(0,0,0,0.45)",
+                backdropFilter: "blur(4px)",
+                textShadow: "0 2px 10px rgba(0,0,0,0.6)",
+                textAlign: "center",
+              }}
+            >
+              {running ? "Get ready…" : "Step into frame to start"}
+            </div>
           </div>
-        )}
-      </div>
 
-      {/* Webcam below, with the existing ghost overlay + full-body gate. */}
-      <CameraStage
-        videoRef={videoRef}
-        canvasRef={canvasRef}
-        ready={ready}
-        error={error}
-        errorKind={errorKind}
-        onRetry={retry}
-      >
-        <div
-          style={{
-            position: "absolute",
-            top: 12,
-            left: 0,
-            right: 0,
-            display: "flex",
-            justifyContent: "center",
-            pointerEvents: "none",
-          }}
-        >
+          {/* Start / Skip overlaid on the webcam so they don't add a tall row. */}
           <div
-            ref={scoreRef}
-            data-testid="live-score"
             style={{
-              fontWeight: 800,
-              fontSize: "1.1rem",
-              lineHeight: 1.1,
-              color: "#aaa",
-              padding: "10px 22px",
-              borderRadius: 14,
-              background: "rgba(0,0,0,0.45)",
-              backdropFilter: "blur(4px)",
-              textShadow: "0 2px 10px rgba(0,0,0,0.6)",
-              textAlign: "center",
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: 28,
+              display: "flex",
+              gap: 10,
+              justifyContent: "center",
             }}
           >
-            {running ? "Get ready…" : "Step into frame to start"}
+            {!running && phase !== "finished" && (
+              <button
+                onClick={start}
+                data-testid="synced-start"
+                disabled={phase !== "prestart" || !readyToStart}
+                style={{
+                  padding: "10px 24px",
+                  fontSize: "1rem",
+                  fontWeight: 700,
+                  borderRadius: 8,
+                  border: "1px solid #14532d",
+                  background:
+                    phase === "prestart" && readyToStart ? "#16a34a" : "rgba(20,20,20,0.85)",
+                  color: phase === "prestart" && readyToStart ? "#04130a" : "#888",
+                  cursor:
+                    phase === "prestart" && readyToStart ? "pointer" : "not-allowed",
+                }}
+              >
+                {phase === "loading"
+                  ? "Loading…"
+                  : readyToStart
+                    ? "Start ▶"
+                    : "Step into frame…"}
+              </button>
+            )}
+            {running && !synced && (
+              <button
+                onClick={advanceSelf}
+                data-testid="skip-next"
+                style={{ ...btn, background: "rgba(26,26,26,0.85)" }}
+              >
+                Skip / Next
+              </button>
+            )}
           </div>
-        </div>
 
-        <div
-          style={{
-            position: "absolute",
-            left: 16,
-            right: 16,
-            bottom: 14,
-            height: 10,
-            background: "rgba(0,0,0,0.55)",
-            borderRadius: 5,
-            overflow: "hidden",
-          }}
-        >
+          {/* Pass-through progress bar. */}
           <div
-            ref={holdBarRef}
             style={{
-              width: "0%",
-              height: "100%",
-              background: "#22c55e",
-              transition: "width 60ms linear",
-            }}
-          />
-        </div>
-      </CameraStage>
-
-      <div style={{ color: "#888", fontSize: "0.8rem" }}>
-        <span style={{ color: "#ff40ff" }}>⬤</span> target pose ·{" "}
-        <span style={{ color: "cyan" }}>⬤</span> you —{" "}
-        {synced
-          ? "hit each pose as the video reaches it"
-          : "hit each pose to advance; the video is your reference"}
-      </div>
-
-      <div style={{ display: "flex", gap: 12 }}>
-        {!running && phase !== "finished" && (
-          <button
-            onClick={start}
-            data-testid="synced-start"
-            disabled={phase !== "prestart" || !readyToStart}
-            style={{
-              padding: "12px 28px",
-              fontSize: "1rem",
-              fontWeight: 700,
-              borderRadius: 8,
-              border: "1px solid #14532d",
-              background:
-                phase === "prestart" && readyToStart ? "#16a34a" : "#1a1a1a",
-              color: phase === "prestart" && readyToStart ? "#04130a" : "#666",
-              cursor:
-                phase === "prestart" && readyToStart ? "pointer" : "not-allowed",
+              position: "absolute",
+              left: 16,
+              right: 16,
+              bottom: 12,
+              height: 8,
+              background: "rgba(0,0,0,0.55)",
+              borderRadius: 5,
+              overflow: "hidden",
             }}
           >
-            {phase === "loading"
-              ? "Loading…"
-              : readyToStart
-                ? "Start ▶"
-                : "Step into frame…"}
-          </button>
-        )}
-        {/* Self-paced keeps the manual Skip / Next so a move is never stuck. */}
-        {running && !synced && (
-          <button onClick={advanceSelf} data-testid="skip-next" style={btn}>
-            Skip / Next
-          </button>
-        )}
-        <button onClick={onBack} style={{ ...btn, background: "#111" }}>
-          Back to Moves
-        </button>
+            <div
+              ref={holdBarRef}
+              style={{
+                width: "0%",
+                height: "100%",
+                background: "#22c55e",
+                transition: "width 60ms linear",
+              }}
+            />
+          </div>
+        </CameraStage>
       </div>
     </div>
   );

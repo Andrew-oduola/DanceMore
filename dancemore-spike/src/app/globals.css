@@ -116,6 +116,24 @@ button:focus-visible {
   }
 }
 
+/* Synced split-screen practice: exactly one viewport tall, no scrolling.
+   100dvh keeps mobile browser chrome from forcing overflow; the vh line is a
+   fallback for browsers without dvh. */
+.practice-fit {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* The YouTube IFrame Player API replaces our host div with an <iframe>; make it
+   fill its aspect-ratio wrapper so the video scales down to fit its panel. */
+.yt-fit iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
 /* The DanceMore wordmark: cyan→green gradient text (skeleton + score colors). */
 .wordmark {
   font-weight: 800;

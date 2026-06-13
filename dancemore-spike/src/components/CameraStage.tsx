@@ -14,6 +14,7 @@ export function CameraStage({
   error,
   errorKind,
   onRetry,
+  containerStyle,
   children,
 }: {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -22,6 +23,9 @@ export function CameraStage({
   error: string | null;
   errorKind?: CameraErrorKind | null;
   onRetry?: () => void;
+  // Sizing override (default: full-width 4:3). Synced split-screen passes a
+  // height-constrained box so it scales down to share the viewport.
+  containerStyle?: React.CSSProperties;
   children?: ReactNode;
 }) {
   return (
@@ -33,6 +37,7 @@ export function CameraStage({
         background: "#000",
         borderRadius: 8,
         overflow: "hidden",
+        ...containerStyle,
       }}
     >
       <video
