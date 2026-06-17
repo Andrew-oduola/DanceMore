@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { CameraStage } from "@/components/CameraStage";
-import { hasFullBody } from "@/lib/bodyGate";
+import { createFullBodyGate } from "@/lib/bodyGate";
 import { scoreColor } from "@/lib/scoreColor";
 import { validYoutubeId, type Move } from "@/lib/moves";
 import {
@@ -75,6 +75,11 @@ export function SyncedPractice({
   const pausedRef = useRef(false);
   const finishedRef = useRef(false);
   // Auto-start bookkeeping.
+  // Stable, hysteretic full-body gate — smooths leg-keypoint noise so the
+  // green/yellow prompt doesn't chatter and the countdown isn't cancelled by a
+  // momentary dropout. (Scoring still uses the strict per-frame gate inside
+  // scoreCheckpointFrame; this only drives the indicator + auto-start.)
+  const fullBodyGateRef = useRef(createFullBodyGate());
   const stableStartRef = useRef<number | null>(null); // when full body became continuously true
   const countdownStartRef = useRef<number | null>(null); // when the countdown began
   const lastBeepRef = useRef(0);
@@ -199,7 +204,9 @@ export function SyncedPractice({
 
   const { videoRef, canvasRef, ready, error, errorKind, retry, ghostRef } =
     usePoseDetection((kp, angles) => {
-      const full = hasFullBody(kp);
+      // Advance the stable gate every frame so its debounce window stays
+      // continuous regardless of phase.
+      const full = fullBodyGateRef.current.update(kp, performance.now());
 
       // Auto-start: prompt for the full body, then count down once it's stably
       // in frame (and the player is ready, i.e. we're past "loading").
