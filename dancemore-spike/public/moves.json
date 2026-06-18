@@ -95,11 +95,32 @@
   ]
 },
   {
-    "id": "freestyle-groove",
-    "name": "Freestyle Groove",
+    "id": "houdini-dua-lipa",
+    "name": "Houdini — Dua Lipa",
     "description": "No steps to match — just move your whole body to the music. The more of you that dances (legs included), the higher you score.",
-    "_comment": "MOVEMENT MODE: a usable youtubeId with NO checkpoints. The video plays as background and scoring measures the user's own whole-body movement (lib/movementScore.ts). Swap youtubeId for any dance/FitDance link.",
-    "youtubeId": "https://youtu.be/ZbZSe6N_BXs",
+    "_comment": "MOVEMENT MODE: a usable youtubeId with NO checkpoints. The video plays as background and scoring measures the user's own whole-body movement (lib/movementScore.ts).",
+    "youtubeId": "rnCQ5pGeKR8",
+    "checkpoints": []
+  },
+  {
+    "id": "thriller-michael-jackson",
+    "name": "Thriller — Michael Jackson",
+    "description": "No steps to match — just move your whole body to the music. The more of you that dances (legs included), the higher you score.",
+    "youtubeId": "WN4WrO3dXRc",
+    "checkpoints": []
+  },
+  {
+    "id": "everybody-backstreet-boys",
+    "name": "Everybody — Backstreet Boys",
+    "description": "No steps to match — just move your whole body to the music. The more of you that dances (legs included), the higher you score.",
+    "youtubeId": "ApJQxQM6z-o",
+    "checkpoints": []
+  },
+  {
+    "id": "hips-dont-lie-shakira",
+    "name": "Hips Don't Lie — Shakira",
+    "description": "No steps to match — just move your whole body to the music. The more of you that dances (legs included), the higher you score.",
+    "youtubeId": "E_dqEua3yck",
     "checkpoints": []
   }
 ]

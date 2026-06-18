@@ -10,6 +10,13 @@
 const path = require("path");
 const { chromium } = require("playwright");
 
+// Derive move-count expectations from the shipped catalog so these assertions
+// stay correct as moves are added/removed (rather than hard-coded numbers).
+const CATALOG = require("./public/moves.json");
+const usableYt = (m) => m.youtubeId && m.youtubeId !== "REPLACE_ME";
+const STARTER_COUNT = CATALOG.length;
+const WATCH_COUNT = CATALOG.filter((m) => m.demoVideo || usableYt(m)).length;
+
 const fx = (f) => path.resolve(__dirname, "test-fixtures", f);
 const Y4M = fx("webcam.y4m");
 const DANCE = fx("dance.mp4");
@@ -168,9 +175,11 @@ const YT_FAKE = `
     (await page.locator("text=✓ Completed").count()) === 0
   );
   const badges = await page.locator("text=▶ Watch").count();
-  // 3 checkpoint/synced starters + the Freestyle Groove movement-mode move all
-  // carry a YouTube link → 4 "▶ Watch" badges.
-  check(`'▶ Watch' badges (found ${badges}, expect 4)`, badges === 4);
+  // Every catalog move with a demo clip or usable YouTube link shows the badge.
+  check(
+    `'▶ Watch' badges (found ${badges}, expect ${WATCH_COUNT})`,
+    badges === WATCH_COUNT
+  );
 
   // ── Split-screen for a YouTube move (no timestamps → self-paced scoring) ──
   // Any move with a YouTube link now shows video-on-top + webcam-below; with no
@@ -417,9 +426,11 @@ const YT_FAKE = `
   await page.click('button:has-text("Dashboard")');
   await page.waitForSelector("text=Score over time");
   const dashText = await page.locator("main").innerText();
+  // 1 completed (the uploaded warrior) out of all starters + the 1 uploaded.
+  const e2eTotal = STARTER_COUNT + 1;
   check(
-    "dashboard shows '1/6 moves completed' (5 starters + 1 uploaded)",
-    dashText.includes("1/6") && dashText.includes("Moves completed")
+    `dashboard shows '1/${e2eTotal} moves completed' (${STARTER_COUNT} starters + 1 uploaded)`,
+    dashText.includes(`1/${e2eTotal}`) && dashText.includes("Moves completed")
   );
   check(
     "✓ on the completed move's mastery row",
@@ -465,9 +476,10 @@ const YT_FAKE = `
   await page.click('[aria-label="Dismiss"]');
   check("banner dismissible", !(await page.isVisible("text=consider a rest day")));
   const demoDash = await page.locator("main").innerText();
+  // demo has 3 seeded completions across the starter catalog (no uploads here).
   check(
-    "demo dashboard 'Moves completed' = 3/5",
-    demoDash.includes("3/5")
+    `demo dashboard 'Moves completed' = 3/${STARTER_COUNT}`,
+    demoDash.includes(`3/${STARTER_COUNT}`)
   );
   const dots = await page.locator(".recharts-area-dot").count();
   check(`dashboard chart renders (dots=${dots}, expect ≥33)`, dots >= 33);
@@ -1230,8 +1242,8 @@ const YT_FAKE = `
   }
 
   // ── Movement mode (score your OWN whole-body movement) ──
-  // The Freestyle Groove starter has a youtubeId and NO checkpoints, so it runs
-  // the separate movement-scoring path: video plays as background, the webcam
+  // The Houdini song starter has a youtubeId and NO checkpoints, so it runs the
+  // separate movement-scoring path: video plays as background, the webcam
   // scores movement, region indicators light up, RESULT shows a per-region
   // breakdown. (Magnitude assertions — still≈0, upper<full — are the manual
   // acceptance; here we lock the path/layout/finish/result/save are wired.)
@@ -1254,7 +1266,7 @@ const YT_FAKE = `
     await mp.fill('input[placeholder="Password"]', "demo1234");
     await mp.click('button:has-text("Log in")');
     await mp.waitForSelector("text=Pick a move to practice");
-    await mp.click("text=Freestyle Groove");
+    await mp.click("text=Houdini"); // movement-mode starter (no checkpoints)
     if (
       await mp
         .waitForSelector("text=Warm up first", { timeout: 2500 })
