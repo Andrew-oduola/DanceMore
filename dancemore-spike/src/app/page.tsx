@@ -13,10 +13,17 @@ import {
   validYoutubeId,
   hasVideo,
   isSynced,
+  isMovement,
   type Move,
 } from "@/lib/moves";
 import { scoreCheckpointFrame } from "@/lib/practiceScore";
+import {
+  REGIONS,
+  REGION_LABEL,
+  type MovementResult,
+} from "@/lib/movementScore";
 import { SyncedPractice } from "@/components/SyncedPractice";
+import { MovementPractice } from "@/components/MovementPractice";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { CameraStage } from "@/components/CameraStage";
 import { scoreColor } from "@/lib/scoreColor";
@@ -47,6 +54,12 @@ type View =
   | { kind: "warmup"; move: Move }
   | { kind: "practice"; move: Move }
   | { kind: "result"; move: Move; peaks: number[]; firstCompletion: boolean }
+  | {
+      kind: "movement-result";
+      move: Move;
+      result: MovementResult;
+      firstCompletion: boolean;
+    }
   | { kind: "dashboard" };
 
 export default function Page() {
@@ -157,6 +170,18 @@ export default function Page() {
       !celebratedRef.current.has(move.id);
     if (firstCompletion) celebratedRef.current.add(move.id);
     setView({ kind: "result", move, peaks, firstCompletion });
+  }
+
+  // Finishing a MOVEMENT-mode attempt → its own RESULT. Same first-completion
+  // logic as checkpoint moves, judged on the overall movement score.
+  function finishMovement(move: Move, result: MovementResult) {
+    const priorBest = bestScores[move.id] ?? 0;
+    const firstCompletion =
+      result.overall >= COMPLETE_THRESHOLD &&
+      priorBest < COMPLETE_THRESHOLD &&
+      !celebratedRef.current.has(move.id);
+    if (firstCompletion) celebratedRef.current.add(move.id);
+    setView({ kind: "movement-result", move, result, firstCompletion });
   }
 
   // Logout asks for confirmation first; only confirming clears the session.
@@ -342,7 +367,16 @@ export default function Page() {
 
       {authed &&
         view.kind === "practice" &&
-        (hasVideo(view.move) ? (
+        (isMovement(view.move) ? (
+          // Movement mode: no checkpoints — score the user's own whole-body
+          // movement with the video as background. Separate scoring path.
+          <MovementPractice
+            key={view.move.id}
+            move={view.move}
+            onFinish={(result) => finishMovement(view.move, result)}
+            onBack={() => setView({ kind: "library" })}
+          />
+        ) : hasVideo(view.move) ? (
           // Split-screen: video on top, webcam below. Timeline-driven scoring
           // when the move has timestamps; otherwise self-paced with the video
           // as a visual reference. Same scoring core, same RESULT.
@@ -371,6 +405,16 @@ export default function Page() {
         <Result
           move={view.move}
           peaks={view.peaks}
+          firstCompletion={view.firstCompletion}
+          onRetry={() => setView({ kind: "practice", move: view.move })}
+          onBack={() => setView({ kind: "library" })}
+        />
+      )}
+
+      {authed && view.kind === "movement-result" && (
+        <MovementResultScreen
+          move={view.move}
+          result={view.result}
           firstCompletion={view.firstCompletion}
           onRetry={() => setView({ kind: "practice", move: view.move })}
           onBack={() => setView({ kind: "library" })}
@@ -642,7 +686,11 @@ function Library({
                 fontSize: "0.9rem",
               }}
             >
-              <span>{move.checkpoints.length} poses</span>
+              <span>
+                {isMovement(move)
+                  ? "Freestyle — move your whole body"
+                  : `${move.checkpoints.length} poses`}
+              </span>
               {(move.demoVideo || validYoutubeId(move)) && (
                 <span style={chip("#22d3ee", "#164e63")}>▶ Watch</span>
               )}
@@ -1006,6 +1054,145 @@ function Result({
             <span style={{ fontWeight: 700, color: scoreColor(peaks[i] ?? 0) }}>
               {peaks[i] ?? 0}
             </span>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          fontSize: "0.85rem",
+          color:
+            saveState === "saved"
+              ? "#22c55e"
+              : saveState === "failed"
+                ? "#ef4444"
+                : "#888",
+        }}
+      >
+        {saveState === "saving" && "Saving attempt…"}
+        {saveState === "saved" && "Attempt saved ✓"}
+        {saveState === "failed" && "Couldn’t save attempt"}
+      </div>
+
+      <div style={{ display: "flex", gap: 12 }}>
+        <button onClick={onRetry} style={btn}>
+          Try Again
+        </button>
+        <button onClick={onBack} style={{ ...btn, background: "#111" }}>
+          Back to Moves
+        </button>
+      </div>
+    </>
+  );
+}
+
+// ── MOVEMENT RESULT ─────────────────────────────────────────────────────────
+// Result screen for a movement-mode attempt: the overall movement score plus a
+// per-region breakdown (head / arms / torso / legs) showing how much each part
+// was engaged. Saved to the same backend as checkpoint moves — regions map onto
+// `checkpoint_scores`, so the dashboard/streak/badges all keep working.
+function MovementResultScreen({
+  move,
+  result,
+  firstCompletion,
+  onRetry,
+  onBack,
+}: {
+  move: Move;
+  result: MovementResult;
+  firstCompletion: boolean;
+  onRetry: () => void;
+  onBack: () => void;
+}) {
+  const [saveState, setSaveState] = useState<"saving" | "saved" | "failed">(
+    "saving"
+  );
+  const postedRef = useRef(false);
+  useEffect(() => {
+    if (postedRef.current) return;
+    postedRef.current = true;
+    saveAttempt({
+      move_id: move.id,
+      move_name: move.name,
+      overall_score: result.overall,
+      checkpoint_scores: REGIONS.map((r) => ({
+        name: REGION_LABEL[r],
+        score: result.regions[r],
+      })),
+    })
+      .then(() => setSaveState("saved"))
+      .catch(() => setSaveState("failed"));
+  }, [move, result]);
+
+  return (
+    <>
+      <div style={{ fontSize: "1.25rem", fontWeight: 700 }}>{move.name}</div>
+
+      {firstCompletion && (
+        <div
+          style={{
+            width: "100%",
+            textAlign: "center",
+            padding: "14px 16px",
+            borderRadius: 8,
+            border: "1px solid #14532d",
+            background: "linear-gradient(180deg, #0c1f13 0%, #111 100%)",
+            color: "#4ade80",
+            fontWeight: 700,
+          }}
+        >
+          🎉 You moved your whole body — great session!
+        </div>
+      )}
+
+      <div style={{ color: "#888" }}>Movement score</div>
+      <div
+        style={{
+          fontSize: "5rem",
+          fontWeight: 700,
+          color: scoreColor(result.overall),
+          lineHeight: 1,
+        }}
+      >
+        {result.overall}
+      </div>
+
+      <div style={{ color: "#888", fontSize: "0.85rem" }}>
+        How much you engaged each part of your body
+      </div>
+      <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 10 }}>
+        {REGIONS.map((r) => (
+          <div key={r}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: "0.9rem",
+                marginBottom: 4,
+              }}
+            >
+              <span>{REGION_LABEL[r]}</span>
+              <span style={{ fontWeight: 700, color: scoreColor(result.regions[r]) }}>
+                {result.regions[r]}
+              </span>
+            </div>
+            <div
+              style={{
+                height: 10,
+                background: "#1a1a1a",
+                borderRadius: 5,
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${result.regions[r]}%`,
+                  height: "100%",
+                  background: scoreColor(result.regions[r]),
+                  borderRadius: 5,
+                }}
+              />
+            </div>
           </div>
         ))}
       </div>

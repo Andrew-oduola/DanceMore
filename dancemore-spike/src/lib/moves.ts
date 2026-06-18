@@ -43,6 +43,15 @@ export function isSynced(move: Move): boolean {
   return hasVideo(move) && move.checkpoints.some((c) => typeof c.t === "number");
 }
 
+// A movement-mode move has a usable video but NO checkpoints — it doesn't match
+// poses at all; it scores the user's OWN whole-body movement with the video as
+// pure background (see lib/movementScore.ts). This is what makes any FitDance-
+// style YouTube link practicable without authoring checkpoints. Distinct from
+// checkpoint/synced moves, which always carry checkpoints.
+export function isMovement(move: Move): boolean {
+  return hasVideo(move) && move.checkpoints.length === 0;
+}
+
 // A youtubeId that's actually usable (placeholder values don't count).
 // Accepts a bare video ID or a pasted URL in any common shape —
 // youtu.be/<id>, watch?v=<id>, shorts/<id>, embed/<id> — and returns the

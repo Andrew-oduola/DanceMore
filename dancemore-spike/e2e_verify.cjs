@@ -168,7 +168,9 @@ const YT_FAKE = `
     (await page.locator("text=✓ Completed").count()) === 0
   );
   const badges = await page.locator("text=▶ Watch").count();
-  check(`'▶ Watch' badges (found ${badges}, expect 3)`, badges === 3);
+  // 3 checkpoint/synced starters + the Freestyle Groove movement-mode move all
+  // carry a YouTube link → 4 "▶ Watch" badges.
+  check(`'▶ Watch' badges (found ${badges}, expect 4)`, badges === 4);
 
   // ── Split-screen for a YouTube move (no timestamps → self-paced scoring) ──
   // Any move with a YouTube link now shows video-on-top + webcam-below; with no
@@ -416,8 +418,8 @@ const YT_FAKE = `
   await page.waitForSelector("text=Score over time");
   const dashText = await page.locator("main").innerText();
   check(
-    "dashboard shows '1/5 moves completed' (4 starters + 1 uploaded)",
-    dashText.includes("1/5") && dashText.includes("Moves completed")
+    "dashboard shows '1/6 moves completed' (5 starters + 1 uploaded)",
+    dashText.includes("1/6") && dashText.includes("Moves completed")
   );
   check(
     "✓ on the completed move's mastery row",
@@ -464,8 +466,8 @@ const YT_FAKE = `
   check("banner dismissible", !(await page.isVisible("text=consider a rest day")));
   const demoDash = await page.locator("main").innerText();
   check(
-    "demo dashboard 'Moves completed' = 3/4",
-    demoDash.includes("3/4")
+    "demo dashboard 'Moves completed' = 3/5",
+    demoDash.includes("3/5")
   );
   const dots = await page.locator(".recharts-area-dot").count();
   check(`dashboard chart renders (dots=${dots}, expect ≥33)`, dots >= 33);
@@ -1227,9 +1229,109 @@ const YT_FAKE = `
     await sb.close();
   }
 
+  // ── Movement mode (score your OWN whole-body movement) ──
+  // The Freestyle Groove starter has a youtubeId and NO checkpoints, so it runs
+  // the separate movement-scoring path: video plays as background, the webcam
+  // scores movement, region indicators light up, RESULT shows a per-region
+  // breakdown. (Magnitude assertions — still≈0, upper<full — are the manual
+  // acceptance; here we lock the path/layout/finish/result/save are wired.)
+  async function openMovement(y4mFile) {
+    const mb = await chromium.launch({
+      args: [
+        "--use-fake-ui-for-media-stream",
+        "--use-fake-device-for-media-stream",
+        `--use-file-for-fake-video-capture=${y4mFile}`,
+      ],
+    });
+    const ctx = await mb.newContext({
+      permissions: ["camera"],
+      reducedMotion: "reduce",
+    });
+    await ctx.addInitScript(YT_FAKE);
+    const mp = await ctx.newPage();
+    await mp.goto("http://localhost:3000/");
+    await mp.fill('input[placeholder="Username"]', "demo");
+    await mp.fill('input[placeholder="Password"]', "demo1234");
+    await mp.click('button:has-text("Log in")');
+    await mp.waitForSelector("text=Pick a move to practice");
+    await mp.click("text=Freestyle Groove");
+    if (
+      await mp
+        .waitForSelector("text=Warm up first", { timeout: 2500 })
+        .then(() => true)
+        .catch(() => false)
+    )
+      await mp.click("text=Skip for now");
+    await mp.waitForSelector('[data-testid="movement-practice"]', { timeout: 15000 });
+    return { mb, mp };
+  }
+
+  {
+    const { mb, mp } = await openMovement(Y4M); // full-body warrior webcam
+    check(
+      "movement: checkpoint-less YouTube move opens movement mode (video + webcam)",
+      (await mp.isVisible('[data-testid="movement-practice"]')) &&
+        (await mp.getByTestId("movement-score").count()) === 1
+    );
+    check(
+      "movement: four region indicators present (head/arms/torso/legs)",
+      (await mp.getByTestId("region-head").count()) === 1 &&
+        (await mp.getByTestId("region-arms").count()) === 1 &&
+        (await mp.getByTestId("region-torso").count()) === 1 &&
+        (await mp.getByTestId("region-legs").count()) === 1
+    );
+    check(
+      "movement: no result before it starts",
+      !(await mp.isVisible("text=Movement score"))
+    );
+    const moveStarted = await mp
+      .waitForFunction(
+        () =>
+          document
+            .querySelector('[data-testid="movement-practice"]')
+            ?.getAttribute("data-phase") === "running",
+        null,
+        { timeout: 20000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    check("movement: AUTO-STARTS when full body in frame (no click)", moveStarted);
+    // Let it score a couple seconds, then end via the Finish button.
+    await mp.waitForTimeout(2500);
+    await mp.getByTestId("movement-finish").evaluate((el) => el.click());
+    const reachedResult = await mp
+      .waitForSelector("text=Movement score", { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    check("movement: Finish → RESULT with a movement score", reachedResult);
+    const overallMv = await mp
+      .locator("text=Movement score")
+      .locator("xpath=following-sibling::div[1]")
+      .innerText()
+      .catch(() => "?");
+    check(
+      `movement: result overall is a finite 0–100 score ("${overallMv}")`,
+      /^\d{1,3}$/.test(overallMv.trim()) && parseInt(overallMv, 10) <= 100
+    );
+    check(
+      "movement: per-region breakdown shown (Head/Arms/Torso/Legs)",
+      (await mp.isVisible("text=Head")) &&
+        (await mp.isVisible("text=Arms")) &&
+        (await mp.isVisible("text=Torso")) &&
+        (await mp.isVisible("text=Legs"))
+    );
+    const savedMv = await mp
+      .waitForSelector("text=Attempt saved", { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    check("movement: attempt saved to backend (region breakdown)", savedMv);
+    await mp.screenshot({ path: "shot_movement.png" });
+    await mb.close();
+  }
+
   await browser.close();
   console.log(
-    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png, shot_camera_denied.png, shot_author.png, shot_synced.png"
+    "Screenshots: shot_login.png, shot_upload_review.png, shot_practice.png, shot_dashboard.png, shot_camera_denied.png, shot_author.png, shot_synced.png, shot_movement.png"
   );
   console.log(failures === 0 ? "\nALL E2E CHECKS PASSED" : `\n${failures} FAILURES`);
   process.exit(failures === 0 ? 0 : 1);

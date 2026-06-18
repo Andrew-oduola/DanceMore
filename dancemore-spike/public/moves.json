@@ -93,5 +93,13 @@
       }
     }
   ]
-}
+},
+  {
+    "id": "freestyle-groove",
+    "name": "Freestyle Groove",
+    "description": "No steps to match — just move your whole body to the music. The more of you that dances (legs included), the higher you score.",
+    "_comment": "MOVEMENT MODE: a usable youtubeId with NO checkpoints. The video plays as background and scoring measures the user's own whole-body movement (lib/movementScore.ts). Swap youtubeId for any dance/FitDance link.",
+    "youtubeId": "https://youtu.be/ZbZSe6N_BXs",
+    "checkpoints": []
+  }
 ]
