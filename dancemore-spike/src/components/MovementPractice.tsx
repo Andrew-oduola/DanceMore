@@ -56,25 +56,36 @@ const TIER_COLOR: Record<Tier, string> = {
   full: "#fbbf24",
 };
 
-// Intensity (0..1, smoothed) → tier. All four regions active = whole-body,
-// which outranks raw intensity (the client's "reward full-body" ask).
+// Intensity (0..1, smoothed) → which TIER of word shows. Intensity only chooses
+// the wording (bigger moves → "Fire 🔥"); it never gates WHETHER a popup fires —
+// the steady cadence below owns that. All four regions active = whole-body,
+// which outranks raw intensity (the client's "reward full-body" ask). Note there
+// is no "idle" tier here: once we've decided to praise, even gentle movement
+// gets the low pool rather than silence.
 const T_HIGH = 0.5;
 const T_MED = 0.22;
-const T_LOW = 0.08;
-function pickTier(intensity: number, activeCount: number): Tier {
+function tierForEmit(intensity: number, activeCount: number): Exclude<Tier, "idle"> {
   if (activeCount >= REGIONS.length) return "full";
   if (intensity >= T_HIGH) return "high";
   if (intensity >= T_MED) return "medium";
-  if (intensity >= T_LOW) return "low";
-  return "idle";
+  return "low";
 }
 
-// Throttle: a fresh popup every ~1.5–2.5s while moving, much rarer when idle.
 const POPUP_LIFE_MS = 2000; // matches the dm-popup keyframe duration
-const DELAY_MIN = 1500;
-const DELAY_MAX = 2500;
-const IDLE_DELAY_MIN = 3200;
-const IDLE_DELAY_MAX = 4800;
+
+// ── Popup cadence (tune here) ────────────────────────────────────────────────
+// GUARANTEED floor: while the user is moving AT ALL, a popup is emitted at least
+// this often no matter the intensity — this is the knob the client asked for.
+const POPUP_CADENCE_MS = 10000; // ≥ one encouraging word every ~10s while active
+// Lively cap: even big whole-body dancing won't spam faster than this.
+const POPUP_MIN_GAP_MS = 1800;
+// True stillness: a gentle nudge at most, and rarely — roughly one every ~12s,
+// far sparser than the active cadence so standing still gets little/no praise.
+const IDLE_NUDGE_MS = 12000;
+// "Moving at all" = any region cleared its active threshold, or smoothed
+// intensity is above this low floor. Generous on purpose: one energetically
+// waving limb counts as dancing even if the smoothed overall reads low.
+const ACTIVE_FLOOR = 0.04;
 const NUDGE_CHANCE = 0.3; // when idle, only sometimes nudge — usually stay quiet
 
 type Popup = {
@@ -132,7 +143,6 @@ export function MovementPractice({
   const [popups, setPopups] = useState<Popup[]>([]);
   const popupIdRef = useRef(0);
   const lastPopupAtRef = useRef(0);
-  const nextDelayRef = useRef(DELAY_MIN);
   const lastTextRef = useRef<string | null>(null);
 
   const [phase, setPhase] = useState<Phase>("loading");
@@ -179,7 +189,6 @@ export function MovementPractice({
     // Fresh start for the praise throttle so the first cue can land promptly.
     setPopups([]);
     lastPopupAtRef.current = 0;
-    nextDelayRef.current = DELAY_MIN;
     lastTextRef.current = null;
     setPhaseBoth("running");
     try {
@@ -218,13 +227,7 @@ export function MovementPractice({
     return w;
   }
 
-  function spawnPopup(
-    text: string,
-    color: string,
-    now: number,
-    delayMin: number,
-    delayMax: number
-  ) {
+  function spawnPopup(text: string, color: string, now: number) {
     const id = popupIdRef.current++;
     const left = 18 + Math.random() * 64; // 18–82% across
     const top = 26 + Math.random() * 30; // 26–56% down — varied, not stacked
@@ -235,36 +238,41 @@ export function MovementPractice({
       POPUP_LIFE_MS
     );
     lastPopupAtRef.current = now;
-    nextDelayRef.current = delayMin + Math.random() * (delayMax - delayMin);
   }
 
-  // Throttled, tier-driven praise. Called every scoring frame; emits at most one
-  // popup per (randomized) interval, escalating with intensity / coverage.
+  // Steady, guaranteed encouragement. Called every scoring frame. While the user
+  // is moving at all, a popup is GUARANTEED at least every POPUP_CADENCE_MS,
+  // regardless of how hard they're moving — intensity only selects which TIER of
+  // word appears, it never suppresses the cadence. Big moves fire sooner (so it
+  // feels like a lively stream); genuine stillness drops to an occasional nudge.
   function maybePopup(intensity: number, activeCount: number, now: number) {
-    if (now - lastPopupAtRef.current < nextDelayRef.current) return;
-    const tier = pickTier(intensity, activeCount);
-    if (tier === "idle") {
-      // Nearly still: a gentle nudge once in a while, never a stream of praise.
-      if (Math.random() < NUDGE_CHANCE) {
-        spawnPopup(
-          pickWord(NUDGE_POOL),
-          TIER_COLOR.idle,
-          now,
-          IDLE_DELAY_MIN,
-          IDLE_DELAY_MAX
-        );
-      } else {
-        lastPopupAtRef.current = now;
-        nextDelayRef.current =
-          IDLE_DELAY_MIN + Math.random() * (IDLE_DELAY_MAX - IDLE_DELAY_MIN);
-      }
+    const sinceLast = now - lastPopupAtRef.current;
+    const moving = activeCount > 0 || intensity >= ACTIVE_FLOOR;
+
+    if (!moving) {
+      // True stillness: a gentle nudge now and then — never a stream of praise.
+      if (sinceLast >= IDLE_NUDGE_MS && Math.random() < NUDGE_CHANCE)
+        spawnPopup(pickWord(NUDGE_POOL), TIER_COLOR.idle, now);
       return;
     }
+
+    if (sinceLast < POPUP_MIN_GAP_MS) return; // never spam, however hard they go
+
+    // Between the min-gap and the guaranteed floor, fire probabilistically so it
+    // feels organic — more movement → more likely to land early. At/after the
+    // floor it's forced, so there's always a word within POPUP_CADENCE_MS.
+    const tier = tierForEmit(intensity, activeCount);
+    const energy =
+      tier === "full" || tier === "high" ? 1 : tier === "medium" ? 0.7 : 0.4;
+    const urgency = Math.min(1, sinceLast / POPUP_CADENCE_MS);
+    const forced = sinceLast >= POPUP_CADENCE_MS;
+    if (!forced && Math.random() >= urgency * energy) return;
+
     // Full-body uses its own pool, but mix in the high-energy pool now and then
     // so big whole-body moments still throw the occasional "Fire 🔥".
     let pool = TIER_POOL[tier];
     if (tier === "full" && Math.random() < 0.4) pool = TIER_POOL.high;
-    spawnPopup(pickWord(pool), TIER_COLOR[tier], now, DELAY_MIN, DELAY_MAX);
+    spawnPopup(pickWord(pool), TIER_COLOR[tier], now);
   }
 
   function setRegions(frame: MovementFrame | null) {
@@ -353,13 +361,24 @@ export function MovementPractice({
         return;
       }
 
-      const r = scorerRef.current.frame(kp, now);
-      if (r.state === "no-body") {
+      // Drive the "step back" prompt off the DEBOUNCED gate (`full`), not the
+      // scorer's raw per-frame state, so a single noisy frame can't flash the
+      // prompt — it only appears once the legs have been gone for the gate's
+      // debounce window, and clears the same way (no chatter).
+      if (!full) {
         writeChip(
           "Step back so we can see your whole body — legs included.",
           "#fbbf24",
           "0.95rem"
         );
+        setRegions(null);
+        return;
+      }
+
+      const r = scorerRef.current.frame(kp, now);
+      if (r.state === "no-body") {
+        // Raw gate blipped but the debounced gate still holds — a transient.
+        // Don't nag; just hold (scoring resumes when the keypoints settle).
         setRegions(null);
         return;
       }

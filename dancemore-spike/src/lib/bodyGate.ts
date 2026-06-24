@@ -5,20 +5,22 @@
 
 import { MIN_CONF, type KP } from "./pose";
 
-// "Full body visible" = both hips + both knees + at least one ankle detected
-// with confidence ≥ MIN_CONF. Strict enough to guarantee the legs are in
-// frame; the single-ankle allowance keeps it from flickering when one foot is
-// briefly occluded.
+// "Full body visible" = the LEGS are in frame: both hips + both knees detected
+// with confidence ≥ MIN_CONF. Deliberately lower-body only — head, face, and
+// shoulders are NOT required, because at a normal dancing distance the whole
+// person rarely fits and demanding the head/feet made this gate impossible to
+// satisfy (the "step back" prompt would never clear). Knees+hips is enough to
+// credit leg movement. Ankles are the jitteriest, most-often-cropped keypoints
+// (feet cut off at desk-camera height), so they're intentionally NOT required —
+// requiring them is exactly what reintroduced the "step back won't clear" bug.
+// This now matches legsPresent() below, so the displayed gate and the scoring
+// gate agree on what "legs in frame" means.
 export function hasFullBody(keypoints: KP[]): boolean {
   const by: Record<string, KP> = {};
   for (const k of keypoints) by[k.name] = k;
   const ok = (name: string) => (by[name]?.score ?? 0) >= MIN_CONF;
   return (
-    ok("left_hip") &&
-    ok("right_hip") &&
-    ok("left_knee") &&
-    ok("right_knee") &&
-    (ok("left_ankle") || ok("right_ankle"))
+    ok("left_hip") && ok("right_hip") && ok("left_knee") && ok("right_knee")
   );
 }
 
