@@ -1087,10 +1087,25 @@ function Result({
 }
 
 // ── MOVEMENT RESULT ─────────────────────────────────────────────────────────
-// Result screen for a movement-mode attempt: the overall movement score plus a
-// per-region breakdown (head / arms / torso / legs) showing how much each part
-// was engaged. Saved to the same backend as checkpoint moves — regions map onto
-// `checkpoint_scores`, so the dashboard/streak/badges all keep working.
+// Result screen for a movement-mode attempt. The movement value isn't an
+// accuracy measure, so we DON'T headline it with a number — instead an
+// encouraging closing message + emoji chosen by how much they moved, with a
+// whole-body highlight when the legs were well engaged, and a qualitative
+// (number-free) engagement bar per region. The underlying scores are still saved
+// to the same backend (regions → `checkpoint_scores`) so the dashboard, streak,
+// and badges all keep working exactly as before.
+
+// Overall-movement → closing message. Thresholds are on the same 0–100 scale the
+// (unchanged) scorer produces; sustained whole-body dancing lands "high".
+const MOVE_MSG_HIGH = 55;
+const MOVE_MSG_MED = 25;
+const LEG_HIGHLIGHT = 45; // legs this engaged → "you moved your whole body"
+function closingMessage(overall: number): string {
+  if (overall >= MOVE_MSG_HIGH) return "You crushed it! 🔥";
+  if (overall >= MOVE_MSG_MED) return "Great moves! 😄";
+  return "Nice warm-up! ✨";
+}
+
 function MovementResultScreen({
   move,
   result,
@@ -1124,6 +1139,8 @@ function MovementResultScreen({
       .catch(() => setSaveState("failed"));
   }, [move, result]);
 
+  const wholeBody = result.regions.legs >= LEG_HIGHLIGHT;
+
   return (
     <>
       <div style={{ fontSize: "1.25rem", fontWeight: 700 }}>{move.name}</div>
@@ -1145,36 +1162,35 @@ function MovementResultScreen({
         </div>
       )}
 
-      <div style={{ color: "#888" }}>Movement score</div>
+      {/* Encouraging closing message — replaces the bare numeric score. */}
       <div
+        data-testid="movement-result-message"
         style={{
-          fontSize: "5rem",
-          fontWeight: 700,
-          color: scoreColor(result.overall),
-          lineHeight: 1,
+          fontSize: "2.4rem",
+          fontWeight: 800,
+          textAlign: "center",
+          lineHeight: 1.15,
+          marginTop: 8,
         }}
       >
-        {result.overall}
+        {closingMessage(result.overall)}
       </div>
 
+      {/* Optional whole-body highlight when the legs were really in it. */}
+      {wholeBody && (
+        <div style={{ color: "#4ade80", fontWeight: 700, fontSize: "1.05rem" }}>
+          You moved your whole body! 🙌
+        </div>
+      )}
+
       <div style={{ color: "#888", fontSize: "0.85rem" }}>
-        How much you engaged each part of your body
+        Here&rsquo;s how much you got each part moving
       </div>
       <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 10 }}>
         {REGIONS.map((r) => (
           <div key={r}>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: "0.9rem",
-                marginBottom: 4,
-              }}
-            >
-              <span>{REGION_LABEL[r]}</span>
-              <span style={{ fontWeight: 700, color: scoreColor(result.regions[r]) }}>
-                {result.regions[r]}
-              </span>
+            <div style={{ fontSize: "0.9rem", marginBottom: 4, color: "#ccc" }}>
+              {REGION_LABEL[r]}
             </div>
             <div
               style={{
@@ -1188,7 +1204,7 @@ function MovementResultScreen({
                 style={{
                   width: `${result.regions[r]}%`,
                   height: "100%",
-                  background: scoreColor(result.regions[r]),
+                  background: "linear-gradient(90deg, #22d3ee, #4ade80)",
                   borderRadius: 5,
                 }}
               />

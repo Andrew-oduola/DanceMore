@@ -134,6 +134,37 @@ button:focus-visible {
   border: 0;
 }
 
+/* Movement-mode encouragement popups: fade + scale in, brief hold, then float
+   up and fade out. `forwards` holds the final (invisible) frame until React
+   removes the node. Reduced-motion (above) collapses the duration, so the
+   popups simply don't linger — keeping automated tests deterministic. */
+@keyframes dm-popup {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.6);
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(0) scale(1.12);
+  }
+  28% {
+    transform: translateY(0) scale(1);
+  }
+  68% {
+    opacity: 1;
+    transform: translateY(-12px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-72px) scale(0.92);
+  }
+}
+
+.dm-popup {
+  animation: dm-popup 2s ease-out forwards;
+  will-change: transform, opacity;
+}
+
 /* The DanceMore wordmark: cyan→green gradient text (skeleton + score colors). */
 .wordmark {
   font-weight: 800;

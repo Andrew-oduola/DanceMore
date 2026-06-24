@@ -1294,7 +1294,10 @@ const YT_FAKE = `
     );
     check(
       "movement: no result before it starts",
-      !(await mp.isVisible("text=Movement score"))
+      !(await mp
+        .getByTestId("movement-result-message")
+        .isVisible()
+        .catch(() => false))
     );
     const moveStarted = await mp
       .waitForFunction(
@@ -1312,18 +1315,22 @@ const YT_FAKE = `
     await mp.waitForTimeout(2500);
     await mp.getByTestId("movement-finish").evaluate((el) => el.click());
     const reachedResult = await mp
-      .waitForSelector("text=Movement score", { timeout: 10000 })
+      .waitForSelector('[data-testid="movement-result-message"]', {
+        timeout: 10000,
+      })
       .then(() => true)
       .catch(() => false);
-    check("movement: Finish → RESULT with a movement score", reachedResult);
-    const overallMv = await mp
-      .locator("text=Movement score")
-      .locator("xpath=following-sibling::div[1]")
-      .innerText()
-      .catch(() => "?");
     check(
-      `movement: result overall is a finite 0–100 score ("${overallMv}")`,
-      /^\d{1,3}$/.test(overallMv.trim()) && parseInt(overallMv, 10) <= 100
+      "movement: Finish → RESULT with an encouraging message (no bare score)",
+      reachedResult
+    );
+    const closingMv = await mp
+      .getByTestId("movement-result-message")
+      .innerText()
+      .catch(() => "");
+    check(
+      `movement: result headline is an encouraging message ("${closingMv.trim()}")`,
+      /crushed it|great moves|warm-?up/i.test(closingMv)
     );
     check(
       "movement: per-region breakdown shown (Head/Arms/Torso/Legs)",

@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { usePoseDetection } from "@/hooks/usePoseDetection";
 import { CameraStage } from "@/components/CameraStage";
 import { createFullBodyGate } from "@/lib/bodyGate";
-import { scoreColor } from "@/lib/scoreColor";
 import { validYoutubeId, type Move } from "@/lib/moves";
 import {
   createMovementScorer,
@@ -32,6 +31,61 @@ const REGION_COLOR: Record<Region, string> = {
   legs: "#4ade80",
 };
 
+// ── Encouragement popups ─────────────────────────────────────────────────────
+// The movement engine (lib/movementScore.ts — untouched) still produces the
+// smoothed intensity and per-region active flags every frame; we no longer show
+// that as a number. Instead it picks an encouraging word + emoji that floats up
+// over the camera. Intensity selects the TIER; the more you move (and the more
+// of your body you engage), the higher-energy the praise.
+type Tier = "idle" | "low" | "medium" | "high" | "full";
+
+const TIER_POOL: Record<Exclude<Tier, "idle">, string[]> = {
+  low: ["Let's go 💃", "Keep moving ✨", "Warm up 👍"],
+  medium: ["Nice! 😄", "Looking good ✨", "Yes! 🙌"],
+  high: ["Fire 🔥", "Wow 🤩", "Amazing ⚡", "Crushing it 💪"],
+  full: ["Full body! 🙌", "All in 🌟"],
+};
+// Standing-still gets a gentle nudge at most — never a stream of praise.
+const NUDGE_POOL = ["Keep it going ✨", "Let's go 💃", "Warm up 👍"];
+
+const TIER_COLOR: Record<Tier, string> = {
+  idle: "#94a3b8",
+  low: "#67e8f9",
+  medium: "#4ade80",
+  high: "#fb923c",
+  full: "#fbbf24",
+};
+
+// Intensity (0..1, smoothed) → tier. All four regions active = whole-body,
+// which outranks raw intensity (the client's "reward full-body" ask).
+const T_HIGH = 0.5;
+const T_MED = 0.22;
+const T_LOW = 0.08;
+function pickTier(intensity: number, activeCount: number): Tier {
+  if (activeCount >= REGIONS.length) return "full";
+  if (intensity >= T_HIGH) return "high";
+  if (intensity >= T_MED) return "medium";
+  if (intensity >= T_LOW) return "low";
+  return "idle";
+}
+
+// Throttle: a fresh popup every ~1.5–2.5s while moving, much rarer when idle.
+const POPUP_LIFE_MS = 2000; // matches the dm-popup keyframe duration
+const DELAY_MIN = 1500;
+const DELAY_MAX = 2500;
+const IDLE_DELAY_MIN = 3200;
+const IDLE_DELAY_MAX = 4800;
+const NUDGE_CHANCE = 0.3; // when idle, only sometimes nudge — usually stay quiet
+
+type Popup = {
+  id: number;
+  text: string;
+  color: string;
+  left: number; // % across the camera, varied so they don't stack
+  top: number; // %
+  rot: number; // slight tilt for a playful feel
+};
+
 // Movement mode: the YouTube clip plays on top purely as background/inspiration
 // while the webcam below scores the user's OWN whole-body movement (see
 // lib/movementScore.ts — a separate path from checkpoint/synced scoring). Same
@@ -51,7 +105,6 @@ export function MovementPractice({
   // Live, per-frame state kept out of React (updated imperatively each frame).
   const scorerRef = useRef(createMovementScorer());
   const scoreRef = useRef<HTMLDivElement>(null);
-  const meterRef = useRef<HTMLDivElement>(null);
   const regionRefs = useRef<Record<Region, HTMLDivElement | null>>({
     head: null,
     arms: null,
@@ -72,6 +125,15 @@ export function MovementPractice({
   const countdownStartRef = useRef<number | null>(null);
   const lastBeepRef = useRef(0);
   const audioRef = useRef<AudioContext | null>(null);
+
+  // Encouragement popups live in React state (they spawn ~every 2s, not every
+  // frame, so reconciling them is cheap); the throttle bookkeeping stays in refs
+  // so the per-frame scoring callback can drive it without re-rendering.
+  const [popups, setPopups] = useState<Popup[]>([]);
+  const popupIdRef = useRef(0);
+  const lastPopupAtRef = useRef(0);
+  const nextDelayRef = useRef(DELAY_MIN);
+  const lastTextRef = useRef<string | null>(null);
 
   const [phase, setPhase] = useState<Phase>("loading");
   const [countdownNum, setCountdownNum] = useState<number | null>(null);
@@ -114,6 +176,11 @@ export function MovementPractice({
     countdownStartRef.current = null;
     setCountdownNum(null);
     scorerRef.current.reset(); // don't count any pre-start jitter
+    // Fresh start for the praise throttle so the first cue can land promptly.
+    setPopups([]);
+    lastPopupAtRef.current = 0;
+    nextDelayRef.current = DELAY_MIN;
+    lastTextRef.current = null;
     setPhaseBoth("running");
     try {
       playerRef.current?.playVideo();
@@ -122,17 +189,84 @@ export function MovementPractice({
     }
   }
 
+  // The status chip carries only SYSTEM guidance now ("step back", "paused",
+  // "start moving") — never a number. During live scoring it's hidden and the
+  // floating popups do the talking.
   function writeChip(text: string, color: string, size: string) {
     const el = scoreRef.current;
     if (!el) return;
     el.textContent = text;
     el.style.color = color;
     el.style.fontSize = size;
+    el.style.opacity = "1";
   }
-  function setMeter(pct: number) {
-    if (meterRef.current)
-      meterRef.current.style.width = `${Math.round(Math.min(1, pct) * 100)}%`;
+  function clearChip() {
+    const el = scoreRef.current;
+    if (!el) return;
+    el.textContent = "";
+    el.style.opacity = "0";
   }
+
+  // Pick a word from a pool, avoiding an immediate repeat of the last one shown.
+  function pickWord(pool: string[]): string {
+    if (pool.length === 1) return pool[0];
+    let w = pool[Math.floor(Math.random() * pool.length)];
+    let guard = 0;
+    while (w === lastTextRef.current && guard++ < 5)
+      w = pool[Math.floor(Math.random() * pool.length)];
+    lastTextRef.current = w;
+    return w;
+  }
+
+  function spawnPopup(
+    text: string,
+    color: string,
+    now: number,
+    delayMin: number,
+    delayMax: number
+  ) {
+    const id = popupIdRef.current++;
+    const left = 18 + Math.random() * 64; // 18–82% across
+    const top = 26 + Math.random() * 30; // 26–56% down — varied, not stacked
+    const rot = (Math.random() * 2 - 1) * 7;
+    setPopups((prev) => [...prev, { id, text, color, left, top, rot }]);
+    window.setTimeout(
+      () => setPopups((prev) => prev.filter((p) => p.id !== id)),
+      POPUP_LIFE_MS
+    );
+    lastPopupAtRef.current = now;
+    nextDelayRef.current = delayMin + Math.random() * (delayMax - delayMin);
+  }
+
+  // Throttled, tier-driven praise. Called every scoring frame; emits at most one
+  // popup per (randomized) interval, escalating with intensity / coverage.
+  function maybePopup(intensity: number, activeCount: number, now: number) {
+    if (now - lastPopupAtRef.current < nextDelayRef.current) return;
+    const tier = pickTier(intensity, activeCount);
+    if (tier === "idle") {
+      // Nearly still: a gentle nudge once in a while, never a stream of praise.
+      if (Math.random() < NUDGE_CHANCE) {
+        spawnPopup(
+          pickWord(NUDGE_POOL),
+          TIER_COLOR.idle,
+          now,
+          IDLE_DELAY_MIN,
+          IDLE_DELAY_MAX
+        );
+      } else {
+        lastPopupAtRef.current = now;
+        nextDelayRef.current =
+          IDLE_DELAY_MIN + Math.random() * (IDLE_DELAY_MAX - IDLE_DELAY_MIN);
+      }
+      return;
+    }
+    // Full-body uses its own pool, but mix in the high-energy pool now and then
+    // so big whole-body moments still throw the occasional "Fire 🔥".
+    let pool = TIER_POOL[tier];
+    if (tier === "full" && Math.random() < 0.4) pool = TIER_POOL.high;
+    spawnPopup(pickWord(pool), TIER_COLOR[tier], now, DELAY_MIN, DELAY_MAX);
+  }
+
   function setRegions(frame: MovementFrame | null) {
     for (const r of REGIONS) {
       const el = regionRefs.current[r];
@@ -215,7 +349,6 @@ export function MovementPractice({
 
       if (pausedRef.current) {
         writeChip("Paused", "#aaa", "1.1rem");
-        setMeter(0);
         setRegions(null);
         return;
       }
@@ -227,18 +360,21 @@ export function MovementPractice({
           "#fbbf24",
           "0.95rem"
         );
-        setMeter(0);
         setRegions(null);
         return;
       }
       if (r.state === "get-ready") {
         writeChip("Start moving!", "#aaa", "1.4rem");
-        setMeter(0);
         setRegions(r);
         return;
       }
-      writeChip(String(r.score), scoreColor(r.score), "3.25rem");
-      setMeter(r.intensity);
+      // Scoring: hide the system chip and let the movement drive encouraging
+      // word + emoji popups. (r.score still accrues underneath for the dashboard
+      // — it's just no longer the headline feedback.)
+      clearChip();
+      let activeCount = 0;
+      for (const reg of REGIONS) if (r.regions[reg].active) activeCount++;
+      maybePopup(r.intensity, activeCount, now);
       setRegions(r);
     });
 
@@ -396,7 +532,7 @@ export function MovementPractice({
         </div>
       </div>
 
-      {/* Webcam panel (bottom) — live score, movement meter, region indicators. */}
+      {/* Webcam panel (bottom) — encouragement popups + region indicators. */}
       <div
         style={{
           flex: "1 1 0",
@@ -445,11 +581,42 @@ export function MovementPractice({
                 backdropFilter: "blur(4px)",
                 textShadow: "0 2px 10px rgba(0,0,0,0.6)",
                 textAlign: "center",
+                transition: "opacity 200ms ease",
               }}
             >
               {running ? "Start moving!" : "Step into frame to start"}
             </div>
           </div>
+
+          {/* Encouragement popups — float up over the camera as you dance. Each
+              fades/scales in, holds, then drifts up and out (dm-popup keyframe);
+              position varies so they don't stack in one spot. */}
+          {popups.map((p) => (
+            <div
+              key={p.id}
+              style={{
+                position: "absolute",
+                left: `${p.left}%`,
+                top: `${p.top}%`,
+                transform: `translateX(-50%) rotate(${p.rot}deg)`,
+                pointerEvents: "none",
+              }}
+            >
+              <span
+                className="dm-popup"
+                style={{
+                  display: "inline-block",
+                  whiteSpace: "nowrap",
+                  fontWeight: 800,
+                  fontSize: "2rem",
+                  color: p.color,
+                  textShadow: "0 2px 14px rgba(0,0,0,0.75)",
+                }}
+              >
+                {p.text}
+              </span>
+            </div>
+          ))}
 
           {/* Big auto-start countdown, readable from across the room. */}
           {countdownNum !== null && (
@@ -484,7 +651,7 @@ export function MovementPractice({
               position: "absolute",
               left: 16,
               right: 16,
-              bottom: 30,
+              bottom: 14,
               display: "flex",
               gap: 8,
               justifyContent: "center",
@@ -514,30 +681,6 @@ export function MovementPractice({
                 {REGION_LABEL[r]}
               </div>
             ))}
-          </div>
-
-          {/* Live movement meter. */}
-          <div
-            style={{
-              position: "absolute",
-              left: 16,
-              right: 16,
-              bottom: 12,
-              height: 8,
-              background: "rgba(0,0,0,0.55)",
-              borderRadius: 5,
-              overflow: "hidden",
-            }}
-          >
-            <div
-              ref={meterRef}
-              style={{
-                width: "0%",
-                height: "100%",
-                background: "linear-gradient(90deg, #22d3ee, #4ade80)",
-                transition: "width 80ms linear",
-              }}
-            />
           </div>
         </CameraStage>
       </div>
