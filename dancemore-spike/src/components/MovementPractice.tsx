@@ -60,24 +60,20 @@ const PRAISE_COLORS = ["#67e8f9", "#4ade80", "#fb923c", "#fbbf24", "#f472b6"];
 const POPUP_LIFE_MS = 2000; // matches the dm-popup keyframe duration
 
 // ── Popup cadence (tune here) ────────────────────────────────────────────────
-// GUARANTEED floor: while the user is moving AT ALL, a popup is emitted at least
-// this often no matter the intensity — this is the knob the client asked for.
-const POPUP_CADENCE_MS = 10000; // ≥ one encouraging word every ~10s while active
-// Lively cap: even big whole-body dancing won't spam faster than this.
-const POPUP_MIN_GAP_MS = 1800;
+// While the user is moving, a praise word appears about once every ~10s — and
+// NO faster. Each gap is picked in [MIN, MAX] for a touch of natural variation,
+// but the hard floor (MIN) means intensity can never push popups closer than
+// this. Movement only decides WHETHER the sequence advances (it pauses when
+// idle), not how often — so big moves no longer fire popups early.
+const POPUP_GAP_MIN_MS = 9000; // hard minimum between popups while moving
+const POPUP_GAP_MAX_MS = 11000; // upper end of the jitter → mean ~10s
 // "Moving at all" = any region cleared its active threshold, or smoothed
 // intensity is above this low floor. Generous on purpose: one energetically
 // waving limb counts as dancing even if the smoothed overall reads low. Below
 // this the sequence is paused (idle) — standing still gets no praise.
 const ACTIVE_FLOOR = 0.04;
-// Bigger movement makes a popup land sooner within the cadence window.
-const T_HIGH = 0.5;
-const T_MED = 0.22;
-function paceEnergy(intensity: number, activeCount: number): number {
-  if (activeCount >= REGIONS.length || intensity >= T_HIGH) return 1;
-  if (intensity >= T_MED) return 0.7;
-  return 0.4;
-}
+const randomGap = () =>
+  POPUP_GAP_MIN_MS + Math.random() * (POPUP_GAP_MAX_MS - POPUP_GAP_MIN_MS);
 
 type Popup = {
   id: number;
@@ -128,12 +124,14 @@ export function MovementPractice({
   const lastBeepRef = useRef(0);
   const audioRef = useRef<AudioContext | null>(null);
 
-  // Encouragement popups live in React state (they spawn ~every 2s, not every
+  // Encouragement popups live in React state (they spawn ~every 10s, not every
   // frame, so reconciling them is cheap); the throttle bookkeeping stays in refs
   // so the per-frame scoring callback can drive it without re-rendering.
   const [popups, setPopups] = useState<Popup[]>([]);
   const popupIdRef = useRef(0);
   const lastPopupAtRef = useRef(0);
+  // Randomized target gap (≈10s) the next popup must wait for; re-rolled per emit.
+  const nextGapRef = useRef(POPUP_GAP_MIN_MS);
   // Position in PRAISE_SEQUENCE — advances one step per emitted popup, loops at
   // the end. Reset to 0 each session so the first word is always "Let's go".
   const seqIndexRef = useRef(0);
@@ -183,6 +181,7 @@ export function MovementPractice({
     // and rewind the word sequence so the session opens on "Let's go".
     setPopups([]);
     lastPopupAtRef.current = 0;
+    nextGapRef.current = randomGap();
     seqIndexRef.current = 0;
     setPhaseBoth("running");
     try {
@@ -227,28 +226,19 @@ export function MovementPractice({
       POPUP_LIFE_MS
     );
     lastPopupAtRef.current = now;
+    nextGapRef.current = randomGap(); // re-roll the ~10s gap for the next popup
   }
 
-  // Steady, guaranteed encouragement. Called every scoring frame. While the user
-  // is moving at all, the NEXT sequence word is shown at least every
-  // POPUP_CADENCE_MS regardless of how hard they move; bigger moves just make it
-  // land sooner. Idle pauses the sequence entirely, so standing still neither
-  // praises nor burns through the word list.
+  // Called every scoring frame. While the user is moving, the NEXT sequence word
+  // is shown once roughly every ~10s — and never sooner: the only gate is the
+  // elapsed time vs. the randomized ~10s target, so intensity can't pull popups
+  // closer together. Idle pauses the sequence entirely, so standing still
+  // neither praises nor burns through the word list.
   function maybePopup(intensity: number, activeCount: number, now: number) {
     const moving = activeCount > 0 || intensity >= ACTIVE_FLOOR;
     if (!moving) return; // idle: hold the sequence where it is, show nothing
 
-    const sinceLast = now - lastPopupAtRef.current;
-    if (sinceLast < POPUP_MIN_GAP_MS) return; // never spam, however hard they go
-
-    // Between the min-gap and the guaranteed floor, fire probabilistically so it
-    // feels organic — more movement → more likely to land early. At/after the
-    // floor it's forced, so there's always a word within POPUP_CADENCE_MS.
-    const urgency = Math.min(1, sinceLast / POPUP_CADENCE_MS);
-    const forced = sinceLast >= POPUP_CADENCE_MS;
-    if (!forced && Math.random() >= urgency * paceEnergy(intensity, activeCount))
-      return;
-
+    if (now - lastPopupAtRef.current < nextGapRef.current) return;
     spawnNextPopup(now);
   }
 
