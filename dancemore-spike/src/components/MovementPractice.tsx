@@ -34,42 +34,28 @@ const REGION_COLOR: Record<Region, string> = {
 // ── Encouragement popups ─────────────────────────────────────────────────────
 // The movement engine (lib/movementScore.ts — untouched) still produces the
 // smoothed intensity and per-region active flags every frame; we no longer show
-// that as a number. Instead it picks an encouraging word + emoji that floats up
-// over the camera. Intensity selects the TIER; the more you move (and the more
-// of your body you engage), the higher-energy the praise.
-type Tier = "idle" | "low" | "medium" | "high" | "full";
+// that as a number. Instead an encouraging word + emoji floats up over the
+// camera. Per client direction the words follow a FIXED ORDERED SEQUENCE (not
+// random): each emitted popup shows the next word, looping after the last one.
+// Intensity no longer chooses the word — it only paces the cadence (bigger moves
+// → praise lands sooner). The sequence only advances while the user is actually
+// moving, so standing still never burns through the list.
+const PRAISE_SEQUENCE = [
+  "Let's go 💃",
+  "Good Job 👏",
+  "Nice 😎",
+  "Well done ✨",
+  "Amazing 🤩",
+  "Fabulous 🌟",
+  "Awesome, keep going 🙌",
+  "Fire 🔥",
+  "Awesome ⚡",
+  "Spectacular 🎉",
+];
 
-const TIER_POOL: Record<Exclude<Tier, "idle">, string[]> = {
-  low: ["Let's go 💃", "Keep moving ✨", "Warm up 👍"],
-  medium: ["Nice! 😄", "Looking good ✨", "Yes! 🙌"],
-  high: ["Fire 🔥", "Wow 🤩", "Amazing ⚡", "Crushing it 💪"],
-  full: ["Full body! 🙌", "All in 🌟"],
-};
-// Standing-still gets a gentle nudge at most — never a stream of praise.
-const NUDGE_POOL = ["Keep it going ✨", "Let's go 💃", "Warm up 👍"];
-
-const TIER_COLOR: Record<Tier, string> = {
-  idle: "#94a3b8",
-  low: "#67e8f9",
-  medium: "#4ade80",
-  high: "#fb923c",
-  full: "#fbbf24",
-};
-
-// Intensity (0..1, smoothed) → which TIER of word shows. Intensity only chooses
-// the wording (bigger moves → "Fire 🔥"); it never gates WHETHER a popup fires —
-// the steady cadence below owns that. All four regions active = whole-body,
-// which outranks raw intensity (the client's "reward full-body" ask). Note there
-// is no "idle" tier here: once we've decided to praise, even gentle movement
-// gets the low pool rather than silence.
-const T_HIGH = 0.5;
-const T_MED = 0.22;
-function tierForEmit(intensity: number, activeCount: number): Exclude<Tier, "idle"> {
-  if (activeCount >= REGIONS.length) return "full";
-  if (intensity >= T_HIGH) return "high";
-  if (intensity >= T_MED) return "medium";
-  return "low";
-}
+// Colour cycles with the words so the popups still feel lively/escalating; this
+// is purely visual and independent of the (fixed) word order.
+const PRAISE_COLORS = ["#67e8f9", "#4ade80", "#fb923c", "#fbbf24", "#f472b6"];
 
 const POPUP_LIFE_MS = 2000; // matches the dm-popup keyframe duration
 
@@ -79,14 +65,19 @@ const POPUP_LIFE_MS = 2000; // matches the dm-popup keyframe duration
 const POPUP_CADENCE_MS = 10000; // ≥ one encouraging word every ~10s while active
 // Lively cap: even big whole-body dancing won't spam faster than this.
 const POPUP_MIN_GAP_MS = 1800;
-// True stillness: a gentle nudge at most, and rarely — roughly one every ~12s,
-// far sparser than the active cadence so standing still gets little/no praise.
-const IDLE_NUDGE_MS = 12000;
 // "Moving at all" = any region cleared its active threshold, or smoothed
 // intensity is above this low floor. Generous on purpose: one energetically
-// waving limb counts as dancing even if the smoothed overall reads low.
+// waving limb counts as dancing even if the smoothed overall reads low. Below
+// this the sequence is paused (idle) — standing still gets no praise.
 const ACTIVE_FLOOR = 0.04;
-const NUDGE_CHANCE = 0.3; // when idle, only sometimes nudge — usually stay quiet
+// Bigger movement makes a popup land sooner within the cadence window.
+const T_HIGH = 0.5;
+const T_MED = 0.22;
+function paceEnergy(intensity: number, activeCount: number): number {
+  if (activeCount >= REGIONS.length || intensity >= T_HIGH) return 1;
+  if (intensity >= T_MED) return 0.7;
+  return 0.4;
+}
 
 type Popup = {
   id: number;
@@ -143,7 +134,9 @@ export function MovementPractice({
   const [popups, setPopups] = useState<Popup[]>([]);
   const popupIdRef = useRef(0);
   const lastPopupAtRef = useRef(0);
-  const lastTextRef = useRef<string | null>(null);
+  // Position in PRAISE_SEQUENCE — advances one step per emitted popup, loops at
+  // the end. Reset to 0 each session so the first word is always "Let's go".
+  const seqIndexRef = useRef(0);
 
   const [phase, setPhase] = useState<Phase>("loading");
   const [countdownNum, setCountdownNum] = useState<number | null>(null);
@@ -186,10 +179,11 @@ export function MovementPractice({
     countdownStartRef.current = null;
     setCountdownNum(null);
     scorerRef.current.reset(); // don't count any pre-start jitter
-    // Fresh start for the praise throttle so the first cue can land promptly.
+    // Fresh start for the praise throttle so the first cue can land promptly,
+    // and rewind the word sequence so the session opens on "Let's go".
     setPopups([]);
     lastPopupAtRef.current = 0;
-    lastTextRef.current = null;
+    seqIndexRef.current = 0;
     setPhaseBoth("running");
     try {
       playerRef.current?.playVideo();
@@ -216,18 +210,13 @@ export function MovementPractice({
     el.style.opacity = "0";
   }
 
-  // Pick a word from a pool, avoiding an immediate repeat of the last one shown.
-  function pickWord(pool: string[]): string {
-    if (pool.length === 1) return pool[0];
-    let w = pool[Math.floor(Math.random() * pool.length)];
-    let guard = 0;
-    while (w === lastTextRef.current && guard++ < 5)
-      w = pool[Math.floor(Math.random() * pool.length)];
-    lastTextRef.current = w;
-    return w;
-  }
+  // Emit the NEXT word in the fixed sequence (looping), then advance the index.
+  function spawnNextPopup(now: number) {
+    const i = seqIndexRef.current;
+    const text = PRAISE_SEQUENCE[i % PRAISE_SEQUENCE.length];
+    const color = PRAISE_COLORS[i % PRAISE_COLORS.length];
+    seqIndexRef.current = i + 1;
 
-  function spawnPopup(text: string, color: string, now: number) {
     const id = popupIdRef.current++;
     const left = 18 + Math.random() * 64; // 18–82% across
     const top = 26 + Math.random() * 30; // 26–56% down — varied, not stacked
@@ -241,38 +230,26 @@ export function MovementPractice({
   }
 
   // Steady, guaranteed encouragement. Called every scoring frame. While the user
-  // is moving at all, a popup is GUARANTEED at least every POPUP_CADENCE_MS,
-  // regardless of how hard they're moving — intensity only selects which TIER of
-  // word appears, it never suppresses the cadence. Big moves fire sooner (so it
-  // feels like a lively stream); genuine stillness drops to an occasional nudge.
+  // is moving at all, the NEXT sequence word is shown at least every
+  // POPUP_CADENCE_MS regardless of how hard they move; bigger moves just make it
+  // land sooner. Idle pauses the sequence entirely, so standing still neither
+  // praises nor burns through the word list.
   function maybePopup(intensity: number, activeCount: number, now: number) {
-    const sinceLast = now - lastPopupAtRef.current;
     const moving = activeCount > 0 || intensity >= ACTIVE_FLOOR;
+    if (!moving) return; // idle: hold the sequence where it is, show nothing
 
-    if (!moving) {
-      // True stillness: a gentle nudge now and then — never a stream of praise.
-      if (sinceLast >= IDLE_NUDGE_MS && Math.random() < NUDGE_CHANCE)
-        spawnPopup(pickWord(NUDGE_POOL), TIER_COLOR.idle, now);
-      return;
-    }
-
+    const sinceLast = now - lastPopupAtRef.current;
     if (sinceLast < POPUP_MIN_GAP_MS) return; // never spam, however hard they go
 
     // Between the min-gap and the guaranteed floor, fire probabilistically so it
     // feels organic — more movement → more likely to land early. At/after the
     // floor it's forced, so there's always a word within POPUP_CADENCE_MS.
-    const tier = tierForEmit(intensity, activeCount);
-    const energy =
-      tier === "full" || tier === "high" ? 1 : tier === "medium" ? 0.7 : 0.4;
     const urgency = Math.min(1, sinceLast / POPUP_CADENCE_MS);
     const forced = sinceLast >= POPUP_CADENCE_MS;
-    if (!forced && Math.random() >= urgency * energy) return;
+    if (!forced && Math.random() >= urgency * paceEnergy(intensity, activeCount))
+      return;
 
-    // Full-body uses its own pool, but mix in the high-energy pool now and then
-    // so big whole-body moments still throw the occasional "Fire 🔥".
-    let pool = TIER_POOL[tier];
-    if (tier === "full" && Math.random() < 0.4) pool = TIER_POOL.high;
-    spawnPopup(pickWord(pool), TIER_COLOR[tier], now);
+    spawnNextPopup(now);
   }
 
   function setRegions(frame: MovementFrame | null) {

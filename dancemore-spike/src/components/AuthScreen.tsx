@@ -44,10 +44,10 @@ export function AuthScreen({ onSuccess }: { onSuccess: () => void }) {
           DanceMore
         </div>
         <div style={{ color: "#bbb", fontSize: "1.05rem" }}>
-          Your AI dance coach — real-time pose scoring in the browser.
+          Learn how to dance more with DanceMore.
         </div>
         <div style={{ color: "#666", fontSize: "0.85rem" }}>
-          Pick a move · follow the poses · watch your score climb
+          Pick choreography, follow the dance and have fun in the process.
         </div>
       </div>
 
